@@ -30,7 +30,7 @@ echo "      Done."
 echo "[3/5] Installing dependencies..."
 source "$VENV_DIR/bin/activate"
 pip install --upgrade pip --quiet
-pip install highway-env pygame moviepy debugpy --quiet
+pip install -r "$SCRIPT_DIR/requirements.txt" --quiet
 echo "      Done."
 
 # Step 4: Test basic environment

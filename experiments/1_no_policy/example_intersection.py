@@ -12,11 +12,14 @@ import highway_env
 import os
 import shutil
 
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+
 def main():
     # Clean up previous video folder
-    video_folder = "videos"
+    video_folder = os.path.join(SCRIPT_DIR, "data", "videos")
     if os.path.exists(video_folder):
         shutil.rmtree(video_folder)
+    os.makedirs(video_folder, exist_ok=True)
 
     # Create the intersection environment
     env = gym.make('intersection-v1', render_mode='rgb_array', config={

@@ -1,0 +1,6 @@
+highway-env
+pygame
+moviepy
+debugpy
+stable-baselines3
+matplotlib
