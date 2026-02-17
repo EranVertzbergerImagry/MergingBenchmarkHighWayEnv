@@ -3,4 +3,4 @@ pygame
 moviepy
 debugpy
 stable-baselines3
-matplotlib
+plotly

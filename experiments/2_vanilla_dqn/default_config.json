@@ -1,7 +1,10 @@
 {
   "description": "default",
-  "train_timesteps": 100000,
+  "train_timesteps": 25000,
   "eval_freq": 5000,
+  "eval_episodes": 100,
+  "demo_episodes": 10,
+  "demo_on_train_end": false,
   "env": {
     "observation": {
       "type": "Kinematics",

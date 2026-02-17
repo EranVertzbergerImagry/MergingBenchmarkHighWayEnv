@@ -24,9 +24,8 @@ import json
 import csv
 from datetime import datetime
 import numpy as np
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 from stable_baselines3 import DQN
 from stable_baselines3.common.callbacks import BaseCallback, EvalCallback, CallbackList
 from stable_baselines3.common.monitor import Monitor
@@ -102,12 +101,13 @@ def make_run_dir(config):
 class TrainingPlotCallback(BaseCallback):
     """Saves a training progress plot each time SB3 logs verbose output."""
 
-    def __init__(self, plot_path, episodes_csv, losses_csv,
+    def __init__(self, plot_path, episodes_csv, losses_csv, config,
                  log_interval=4, window=10):
         super().__init__()
         self.plot_path = plot_path
         self.episodes_csv = episodes_csv
         self.losses_csv = losses_csv
+        self.config = config
         self.log_interval = log_interval
         self.window = window
         self.ep_rewards = []
@@ -142,7 +142,7 @@ class TrainingPlotCallback(BaseCallback):
 
     def _on_training_end(self):
         if self.ep_rewards:
-            self._save_plot()
+            self._save_plot(auto_refresh=False)
 
     def _rolling_mean(self, data):
         arr = np.array(data, dtype=float)
@@ -154,40 +154,79 @@ class TrainingPlotCallback(BaseCallback):
         x = np.arange(self.window, len(arr) + 1)
         return x, means
 
-    def _save_plot(self):
-        fig, axes = plt.subplots(3, 1, figsize=(10, 8))
+    def _save_plot(self, auto_refresh=True):
         episodes = np.arange(1, len(self.ep_rewards) + 1)
 
-        axes[0].plot(episodes, self.ep_rewards, alpha=0.3, color="tab:blue")
+        fig = make_subplots(
+            rows=3, cols=1, shared_xaxes=False,
+            subplot_titles=("Episode Reward", "Episode Length", "Loss"),
+            vertical_spacing=0.08,
+        )
+
+        # --- Episode Reward ---
+        fig.add_trace(go.Scatter(
+            x=episodes, y=self.ep_rewards, mode="lines",
+            name="Reward", opacity=0.3, line=dict(color="royalblue"),
+            hovertemplate="Ep %{x}<br>Reward: %{y:.2f}<extra></extra>",
+        ), row=1, col=1)
         rx, rm = self._rolling_mean(self.ep_rewards)
-        axes[0].plot(rx, rm, color="tab:blue",
-                     label=f"rolling mean (w={self.window})")
-        axes[0].set_ylabel("Episode Reward")
-        axes[0].set_xlabel("Episode")
-        axes[0].legend()
-        axes[0].set_title("Social Attention DQN — Training Progress")
-        axes[0].grid(True, alpha=0.3)
+        fig.add_trace(go.Scatter(
+            x=rx, y=rm, mode="lines",
+            name=f"Reward (mean {self.window})", line=dict(color="royalblue", width=2),
+            hovertemplate="Ep %{x}<br>Mean: %{y:.2f}<extra></extra>",
+        ), row=1, col=1)
 
-        axes[1].plot(episodes, self.ep_lengths, alpha=0.3, color="tab:orange")
+        # --- Episode Length ---
+        fig.add_trace(go.Scatter(
+            x=episodes, y=self.ep_lengths, mode="lines",
+            name="Length", opacity=0.3, line=dict(color="darkorange"),
+            hovertemplate="Ep %{x}<br>Length: %{y}<extra></extra>",
+        ), row=2, col=1)
         rx, rm = self._rolling_mean(self.ep_lengths)
-        axes[1].plot(rx, rm, color="tab:orange",
-                     label=f"rolling mean (w={self.window})")
-        axes[1].set_ylabel("Episode Length")
-        axes[1].set_xlabel("Episode")
-        axes[1].legend()
-        axes[1].grid(True, alpha=0.3)
+        fig.add_trace(go.Scatter(
+            x=rx, y=rm, mode="lines",
+            name=f"Length (mean {self.window})", line=dict(color="darkorange", width=2),
+            hovertemplate="Ep %{x}<br>Mean: %{y:.1f}<extra></extra>",
+        ), row=2, col=1)
 
+        # --- Loss ---
         if self.losses:
-            axes[2].plot(self.loss_steps, self.losses, alpha=0.6,
-                         color="tab:red")
-        axes[2].set_ylabel("Loss")
-        axes[2].set_xlabel("Timestep")
-        axes[2].grid(True, alpha=0.3)
+            fig.add_trace(go.Scatter(
+                x=self.loss_steps, y=self.losses, mode="lines",
+                name="Loss", opacity=0.6, line=dict(color="firebrick"),
+                hovertemplate="Step %{x}<br>Loss: %{y:.4f}<extra></extra>",
+            ), row=3, col=1)
 
-        plt.tight_layout()
+        fig.update_xaxes(title_text="Episode", row=1, col=1)
+        fig.update_xaxes(title_text="Episode", row=2, col=1)
+        fig.update_xaxes(title_text="Timestep", row=3, col=1)
+        fig.update_yaxes(title_text="Reward", row=1, col=1)
+        fig.update_yaxes(title_text="Length", row=2, col=1)
+        fig.update_yaxes(title_text="Loss", row=3, col=1)
+
+        env = self.config["env"]
+        subtitle = (
+            f"collision_reward={env['collision_reward']}  "
+            f"high_speed_reward={env['high_speed_reward']}  "
+            f"arrived_reward={env['arrived_reward']}"
+        )
+        desc = self.config.get("description", "default")
+        fig.update_layout(
+            title=(
+                f"Social Attention DQN — {desc}<br>"
+                f"<sup>{subtitle}</sup>"
+            ),
+            height=900, width=1000,
+            hovermode="x unified",
+        )
+
         os.makedirs(os.path.dirname(self.plot_path), exist_ok=True)
-        fig.savefig(self.plot_path, dpi=100)
-        plt.close(fig)
+        html = fig.to_html()
+        if auto_refresh:
+            html = html.replace("<head>",
+                                '<head><meta http-equiv="refresh" content="30">', 1)
+        with open(self.plot_path, "w") as f:
+            f.write(html)
         self._save_csv()
 
     def _save_csv(self):
@@ -225,7 +264,7 @@ def train(config, run_dir):
 
     model_path = os.path.join(run_dir, "models", "social_attention_dqn")
     best_model_dir = os.path.join(run_dir, "models", "best")
-    plot_path = os.path.join(run_dir, "training_progress.png")
+    plot_path = os.path.join(run_dir, "training_progress.html")
     episodes_csv = os.path.join(run_dir, "episodes.csv")
     losses_csv = os.path.join(run_dir, "losses.csv")
 
@@ -253,7 +292,7 @@ def train(config, run_dir):
         verbose=1,
     )
 
-    plot_cb = TrainingPlotCallback(plot_path, episodes_csv, losses_csv)
+    plot_cb = TrainingPlotCallback(plot_path, episodes_csv, losses_csv, config)
     eval_cb = EvalCallback(
         eval_env,
         best_model_save_path=best_model_dir,
@@ -285,11 +324,75 @@ def train(config, run_dir):
 # ---------------------------------------------------------------------------
 # Demo
 # ---------------------------------------------------------------------------
-def demo(model, env_config, run_dir):
+def run_episodes(model, env, num_episodes):
+    """Run episodes and return per-episode results."""
+    results = []
+    for ep in range(num_episodes):
+        obs, info = env.reset()
+        done = False
+        total_reward = 0
+        steps = 0
+
+        while not done:
+            action, _ = model.predict(obs, deterministic=True)
+            obs, reward, terminated, truncated, info = env.step(action)
+            done = terminated or truncated
+            total_reward += reward
+            steps += 1
+
+        crashed = info.get("crashed", False)
+        arrived = info.get("rewards", {}).get("arrived_reward", 0) > 0
+        results.append({
+            "episode": ep + 1,
+            "steps": steps,
+            "reward": total_reward,
+            "crashed": crashed,
+            "arrived": arrived,
+        })
+        status = "ARRIVED" if arrived else ("CRASHED" if crashed else "TIMEOUT")
+        print(f"  Episode {ep + 1}: {status} | Steps: {steps} | Reward: {total_reward:.2f}")
+
+    return results
+
+
+def evaluate(model, env_config, run_dir, num_episodes):
+    eval_csv = os.path.join(run_dir, "evaluation.csv")
+
+    print()
+    print(f"=== Evaluating Trained Agent ({num_episodes} episodes) ===")
+    print()
+
+    env = make_env(env_config)
+    results = run_episodes(model, env, num_episodes)
+    env.close()
+
+    with open(eval_csv, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=["episode", "steps", "reward", "crashed", "arrived"])
+        writer.writeheader()
+        writer.writerows(results)
+
+    n_crashed = sum(r["crashed"] for r in results)
+    n_arrived = sum(r["arrived"] for r in results)
+    avg_reward = np.mean([r["reward"] for r in results])
+
+    with open(eval_csv, "a", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow([
+            "SUMMARY", num_episodes, f"{avg_reward:.2f}",
+            f"{100*n_crashed/num_episodes:.0f}%",
+            f"{100*n_arrived/num_episodes:.0f}%",
+        ])
+
+    print()
+    print(f"  Arrived: {n_arrived}/{num_episodes} ({100*n_arrived/num_episodes:.0f}%)  Crashed: {n_crashed}/{num_episodes} ({100*n_crashed/num_episodes:.0f}%)  Avg reward: {avg_reward:.2f}")
+    print(f"  Saved to {eval_csv}")
+
+
+def demo(model, env_config, run_dir, num_episodes):
     video_folder = os.path.join(SCRIPT_DIR, "data", "videos")
 
     print()
-    print(f"=== Demonstrating Trained Agent (3 episodes) ===")
+    print(f"=== Recording Demo Videos ({num_episodes} episodes) ===")
     print()
 
     if os.path.exists(video_folder):
@@ -305,24 +408,7 @@ def demo(model, env_config, run_dir):
     )
     env.unwrapped.set_record_video_wrapper(env)
 
-    for ep in range(3):
-        obs, info = env.reset()
-        done = False
-        total_reward = 0
-        steps = 0
-
-        while not done:
-            action, _ = model.predict(obs, deterministic=True)
-            obs, reward, terminated, truncated, info = env.step(action)
-            done = terminated or truncated
-            total_reward += reward
-            steps += 1
-
-        crashed = info.get("crashed", False)
-        arrived = info.get("rewards", {}).get("arrived_reward", 0) > 0
-        status = "ARRIVED" if arrived else ("CRASHED" if crashed else "TIMEOUT")
-        print(f"  Episode {ep + 1}: {status} | Steps: {steps} | Reward: {total_reward:.2f}")
-
+    run_episodes(model, env, num_episodes)
     env.close()
 
     print()
@@ -377,12 +463,17 @@ def main():
             print(f"Error: No model found in {run_dir}/models/")
             return
 
-        demo(model, config["env"], run_dir)
+        demo_episodes = config.get("demo_episodes", 3)
+        demo(model, config["env"], run_dir, demo_episodes)
     else:
         config = load_config(args.config)
         run_dir = make_run_dir(config)
         model = train(config, run_dir)
-        demo(model, config["env"], run_dir)
+        eval_episodes = config.get("eval_episodes", 20)
+        evaluate(model, config["env"], run_dir, eval_episodes)
+        if config.get("demo_on_train_end", True):
+            demo_episodes = config.get("demo_episodes", 3)
+            demo(model, config["env"], run_dir, demo_episodes)
 
 
 if __name__ == "__main__":
