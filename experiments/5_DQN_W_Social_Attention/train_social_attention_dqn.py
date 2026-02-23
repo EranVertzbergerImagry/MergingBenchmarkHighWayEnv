@@ -1,13 +1,18 @@
 """
-DQN Agent for Highway-env Intersection
+DQN with Social Attention for Highway-env Intersection
 
-Trains a DQN agent (stable-baselines3) to navigate the intersection
-environment, then demonstrates the trained policy with video recording.
+Trains a DQN agent using the EgoAttention architecture from:
+    "Social Attention for Autonomous Decision-Making in Dense Traffic"
+    (Leurent & Mercat, 2019)
+
+The attention mechanism lets the ego vehicle learn which nearby vehicles
+are most relevant for its decision, producing a permutation-invariant
+and interpretable policy.
 
 Usage:
-    python train_dqn_intersection.py                        # Train with default config
-    python train_dqn_intersection.py --config override.json  # Train with overrides
-    python train_dqn_intersection.py --demo-only --model-path data/runs/<run>/models/best/best_model.zip --config <config>
+    python train_social_attention_dqn.py                        # Train with default config
+    python train_social_attention_dqn.py --config override.json  # Train with overrides
+    python train_social_attention_dqn.py --demo-only --model-path data/runs/<run>/models/best/best_model.zip --config <config>
 """
 import gymnasium as gym
 from gymnasium.wrappers import RecordVideo
@@ -25,8 +30,29 @@ from stable_baselines3 import DQN
 from stable_baselines3.common.callbacks import BaseCallback, EvalCallback, CallbackList
 from stable_baselines3.common.monitor import Monitor
 
+from social_attention_model import SocialAttentionExtractor
 
+# ---------------------------------------------------------------------------
+# Paths
+# ---------------------------------------------------------------------------
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# ---------------------------------------------------------------------------
+# Social Attention model config  (matches ego_attention_2h.json from rl-agents)
+# ---------------------------------------------------------------------------
+POLICY_KWARGS = dict(
+    features_extractor_class=SocialAttentionExtractor,
+    features_extractor_kwargs=dict(
+        embedding_layers=[64, 64],
+        others_embedding_layers=[64, 64],
+        attention_feature_size=64,
+        attention_heads=2,
+        self_attention=False,
+        output_layers=[64, 64],
+        presence_feature_idx=0,
+    ),
+    net_arch=[],  # no extra MLP — output_layer is inside the extractor
+)
 
 
 # ---------------------------------------------------------------------------
@@ -69,6 +95,9 @@ def make_run_dir(config):
     return run_dir
 
 
+# ---------------------------------------------------------------------------
+# Training plot callback  (same as experiment 2)
+# ---------------------------------------------------------------------------
 class TrainingPlotCallback(BaseCallback):
     """Saves a training progress plot each time SB3 logs verbose output."""
 
@@ -90,7 +119,6 @@ class TrainingPlotCallback(BaseCallback):
         self._last_plot_ep = 0
 
     def _on_step(self):
-        # Capture completed-episode stats from the Monitor wrapper
         for info in self.locals.get("infos", []):
             ep_info = info.get("episode")
             if ep_info is not None:
@@ -99,14 +127,12 @@ class TrainingPlotCallback(BaseCallback):
                 self.ep_timesteps.append(self.num_timesteps)
                 self._ep_count += 1
 
-        # Capture loss (recorded by DQN after each train step)
         loss = self.model.logger.name_to_value.get("train/loss")
         if loss is not None:
             if not self.losses or self.losses[-1] != loss:
                 self.losses.append(loss)
                 self.loss_steps.append(self.num_timesteps)
 
-        # Update plot at same cadence as verbose output
         if (self._ep_count >= self._last_plot_ep + self.log_interval
                 and len(self.ep_rewards) >= 2):
             self._last_plot_ep = self._ep_count
@@ -118,7 +144,6 @@ class TrainingPlotCallback(BaseCallback):
         if self.ep_rewards:
             self._save_plot(auto_refresh=False)
 
-    # ------------------------------------------------------------------
     def _rolling_mean(self, data):
         arr = np.array(data, dtype=float)
         if len(arr) < self.window:
@@ -188,7 +213,7 @@ class TrainingPlotCallback(BaseCallback):
         desc = self.config.get("description", "default")
         fig.update_layout(
             title=(
-                f"Vanilla DQN — {desc}<br>"
+                f"Social Attention DQN — {desc}<br>"
                 f"<sup>{subtitle}</sup>"
             ),
             height=900, width=1000,
@@ -222,6 +247,9 @@ class TrainingPlotCallback(BaseCallback):
                 writer.writerow([ts, loss])
 
 
+# ---------------------------------------------------------------------------
+# Eval log callback
+# ---------------------------------------------------------------------------
 class EvalMetricsWrapper(gym.Wrapper):
     """Tracks crash and arrival counts on the eval env."""
 
@@ -301,6 +329,9 @@ class EvalLogCallback(BaseCallback):
         return True
 
 
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 def apply_idm_params(idm_config):
     """Apply IDM behavior parameters to the vehicle class before env creation."""
     from highway_env.vehicle.behavior import IDMVehicle
@@ -318,18 +349,21 @@ def make_env(env_config):
     return gym.make("intersection-v1", render_mode="rgb_array", config=env_config)
 
 
+# ---------------------------------------------------------------------------
+# Train
+# ---------------------------------------------------------------------------
 def train(config, run_dir):
     env_config = config["env"]
     train_timesteps = config["train_timesteps"]
     eval_freq = config.get("eval_freq", 5000)
 
-    model_path = os.path.join(run_dir, "models", "final_model")
+    model_path = os.path.join(run_dir, "models", "social_attention_dqn")
     best_model_dir = os.path.join(run_dir, "models", "best")
     plot_path = os.path.join(run_dir, "training_progress.html")
     episodes_csv = os.path.join(run_dir, "episodes.csv")
     losses_csv = os.path.join(run_dir, "losses.csv")
 
-    print("=== Training DQN on Intersection ===")
+    print("=== Training Social Attention DQN on Intersection ===")
     print(f"Timesteps: {train_timesteps}")
     print(f"Run dir:   {run_dir}")
     print()
@@ -343,14 +377,16 @@ def train(config, run_dir):
     model = DQN(
         "MlpPolicy",
         env,
-        policy_kwargs=dict(net_arch=mc.get("net_arch", [256, 256])),
+        policy_kwargs=POLICY_KWARGS,
         learning_rate=mc.get("learning_rate", 5e-4),
         buffer_size=mc.get("buffer_size", 15_000),
         learning_starts=mc.get("learning_starts", 200),
-        batch_size=mc.get("batch_size", 32),
-        gamma=mc.get("gamma", 0.8),
+        batch_size=mc.get("batch_size", 64),
+        gamma=mc.get("gamma", 0.95),
         train_freq=mc.get("train_freq", 1),
-        target_update_interval=mc.get("target_update_interval", 50),
+        target_update_interval=mc.get("target_update_interval", 512),
+        exploration_fraction=mc.get("exploration_fraction", 0.3),
+        exploration_final_eps=mc.get("exploration_final_eps", 0.05),
         verbose=1,
     )
 
@@ -388,6 +424,9 @@ def train(config, run_dir):
     return model, model_path + ".zip"
 
 
+# ---------------------------------------------------------------------------
+# Demo
+# ---------------------------------------------------------------------------
 def run_episodes(model, env, num_episodes):
     """Run episodes and return per-episode results."""
     results = []
@@ -472,7 +511,7 @@ def demo(model, env_config, run_dir, num_episodes):
         env,
         video_folder=video_folder,
         episode_trigger=lambda e: True,
-        name_prefix="dqn_intersection",
+        name_prefix="social_attn_dqn",
     )
     env.unwrapped.set_record_video_wrapper(env)
 
@@ -488,12 +527,25 @@ def demo(model, env_config, run_dir, num_episodes):
     print("Done!")
 
 
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
 def main():
-    parser = argparse.ArgumentParser(description="DQN agent for intersection env")
-    parser.add_argument("--demo-only", action="store_true", help="Skip training, demo existing model")
-    parser.add_argument("--config", type=str, default=None, help="Path to JSON config with overrides")
-    parser.add_argument("--model-path", type=str, default=None,
-                        help="Path to a .zip model file (for --demo-only)")
+    parser = argparse.ArgumentParser(
+        description="Social Attention DQN for intersection env"
+    )
+    parser.add_argument(
+        "--demo-only", action="store_true",
+        help="Skip training, demo existing model"
+    )
+    parser.add_argument(
+        "--config", type=str, default=None,
+        help="Path to JSON config with overrides"
+    )
+    parser.add_argument(
+        "--model-path", type=str, default=None,
+        help="Path to a .zip model file (for --demo-only)"
+    )
     args = parser.parse_args()
 
     if args.demo_only:

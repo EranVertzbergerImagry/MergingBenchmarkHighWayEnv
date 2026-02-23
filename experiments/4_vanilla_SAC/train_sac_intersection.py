@@ -1,15 +1,18 @@
 """
-DQN Agent for Highway-env Intersection
+SAC Agent for Highway-env Intersection
 
-Trains a DQN agent (stable-baselines3) to navigate the intersection
-environment, then demonstrates the trained policy with video recording.
+Trains a SAC agent (stable-baselines3) to navigate the intersection
+environment. The agent outputs a single continuous value in [0, 1] that
+controls target speed (multiplied by max_speed). The vehicle follows its
+predetermined route automatically; only speed is learned.
 
 Usage:
-    python train_dqn_intersection.py                        # Train with default config
-    python train_dqn_intersection.py --config override.json  # Train with overrides
-    python train_dqn_intersection.py --demo-only --model-path data/runs/<run>/models/best/best_model.zip --config <config>
+    python train_sac_intersection.py                        # Train with default config
+    python train_sac_intersection.py --config override.json  # Train with overrides
+    python train_sac_intersection.py --demo-only --model-path data/runs/<run>/models/best/best_model.zip --config <config>
 """
 import gymnasium as gym
+from gymnasium import spaces
 from gymnasium.wrappers import RecordVideo
 import highway_env
 import os
@@ -21,9 +24,31 @@ from datetime import datetime
 import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-from stable_baselines3 import DQN
+from stable_baselines3 import SAC
 from stable_baselines3.common.callbacks import BaseCallback, EvalCallback, CallbackList
 from stable_baselines3.common.monitor import Monitor
+
+
+class SpeedActionWrapper(gym.Wrapper):
+    """Wraps a DiscreteMetaAction env to accept continuous speed in [0, 1].
+
+    The agent outputs a single value in [0, 1]. This is multiplied by
+    max_speed to set the vehicle's target_speed. The vehicle's built-in
+    controller handles acceleration and steering to follow the route.
+    """
+
+    def __init__(self, env, max_speed=10.0):
+        super().__init__(env)
+        self.max_speed = max_speed
+        self.action_space = spaces.Box(
+            low=np.float32(0), high=np.float32(1),
+            shape=(1,), dtype=np.float32,
+        )
+
+    def step(self, action):
+        target_speed = float(np.clip(action[0], 0, 1)) * self.max_speed
+        self.unwrapped.controlled_vehicles[0].target_speed = target_speed
+        return self.env.step(0)  # IDLE — let the controller drive
 
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -43,8 +68,6 @@ def load_config(config_path=None):
             overrides = json.load(f)
         for key, value in overrides.items():
             if key == "env":
-                # Shallow-merge env: only override top-level env keys,
-                # leave observation/action sub-dicts untouched
                 for env_key, env_value in value.items():
                     config["env"][env_key] = env_value
             else:
@@ -62,7 +85,6 @@ def make_run_dir(config):
     run_dir = os.path.join(data_dir, "runs", run_name)
     os.makedirs(run_dir, exist_ok=True)
 
-    # Save merged config for reproducibility
     with open(os.path.join(run_dir, "config.json"), "w") as f:
         json.dump(config, f, indent=2)
 
@@ -90,7 +112,6 @@ class TrainingPlotCallback(BaseCallback):
         self._last_plot_ep = 0
 
     def _on_step(self):
-        # Capture completed-episode stats from the Monitor wrapper
         for info in self.locals.get("infos", []):
             ep_info = info.get("episode")
             if ep_info is not None:
@@ -99,14 +120,12 @@ class TrainingPlotCallback(BaseCallback):
                 self.ep_timesteps.append(self.num_timesteps)
                 self._ep_count += 1
 
-        # Capture loss (recorded by DQN after each train step)
         loss = self.model.logger.name_to_value.get("train/loss")
         if loss is not None:
             if not self.losses or self.losses[-1] != loss:
                 self.losses.append(loss)
                 self.loss_steps.append(self.num_timesteps)
 
-        # Update plot at same cadence as verbose output
         if (self._ep_count >= self._last_plot_ep + self.log_interval
                 and len(self.ep_rewards) >= 2):
             self._last_plot_ep = self._ep_count
@@ -118,7 +137,6 @@ class TrainingPlotCallback(BaseCallback):
         if self.ep_rewards:
             self._save_plot(auto_refresh=False)
 
-    # ------------------------------------------------------------------
     def _rolling_mean(self, data):
         arr = np.array(data, dtype=float)
         if len(arr) < self.window:
@@ -138,7 +156,6 @@ class TrainingPlotCallback(BaseCallback):
             vertical_spacing=0.08,
         )
 
-        # --- Episode Reward ---
         fig.add_trace(go.Scatter(
             x=episodes, y=self.ep_rewards, mode="lines",
             name="Reward", opacity=0.3, line=dict(color="royalblue"),
@@ -151,7 +168,6 @@ class TrainingPlotCallback(BaseCallback):
             hovertemplate="Ep %{x}<br>Mean: %{y:.2f}<extra></extra>",
         ), row=1, col=1)
 
-        # --- Episode Length ---
         fig.add_trace(go.Scatter(
             x=episodes, y=self.ep_lengths, mode="lines",
             name="Length", opacity=0.3, line=dict(color="darkorange"),
@@ -164,7 +180,6 @@ class TrainingPlotCallback(BaseCallback):
             hovertemplate="Ep %{x}<br>Mean: %{y:.1f}<extra></extra>",
         ), row=2, col=1)
 
-        # --- Loss ---
         if self.losses:
             fig.add_trace(go.Scatter(
                 x=self.loss_steps, y=self.losses, mode="lines",
@@ -188,7 +203,7 @@ class TrainingPlotCallback(BaseCallback):
         desc = self.config.get("description", "default")
         fig.update_layout(
             title=(
-                f"Vanilla DQN — {desc}<br>"
+                f"Vanilla SAC — {desc}<br>"
                 f"<sup>{subtitle}</sup>"
             ),
             height=900, width=1000,
@@ -315,7 +330,9 @@ def apply_idm_params(idm_config):
 
 
 def make_env(env_config):
-    return gym.make("intersection-v1", render_mode="rgb_array", config=env_config)
+    max_speed = env_config.get("max_speed", 10.0)
+    env = gym.make("intersection-v1", render_mode="rgb_array", config=env_config)
+    return SpeedActionWrapper(env, max_speed=max_speed)
 
 
 def train(config, run_dir):
@@ -329,7 +346,7 @@ def train(config, run_dir):
     episodes_csv = os.path.join(run_dir, "episodes.csv")
     losses_csv = os.path.join(run_dir, "losses.csv")
 
-    print("=== Training DQN on Intersection ===")
+    print("=== Training SAC on Intersection ===")
     print(f"Timesteps: {train_timesteps}")
     print(f"Run dir:   {run_dir}")
     print()
@@ -340,17 +357,17 @@ def train(config, run_dir):
     eval_metrics = EvalMetricsWrapper(make_env(env_config))
     eval_env = Monitor(eval_metrics)
 
-    model = DQN(
+    model = SAC(
         "MlpPolicy",
         env,
         policy_kwargs=dict(net_arch=mc.get("net_arch", [256, 256])),
-        learning_rate=mc.get("learning_rate", 5e-4),
+        learning_rate=mc.get("learning_rate", 3e-4),
         buffer_size=mc.get("buffer_size", 15_000),
         learning_starts=mc.get("learning_starts", 200),
-        batch_size=mc.get("batch_size", 32),
+        batch_size=mc.get("batch_size", 256),
         gamma=mc.get("gamma", 0.8),
+        tau=mc.get("tau", 0.005),
         train_freq=mc.get("train_freq", 1),
-        target_update_interval=mc.get("target_update_interval", 50),
         verbose=1,
     )
 
@@ -384,7 +401,7 @@ def train(config, run_dir):
 
     best_path = os.path.join(best_model_dir, "best_model")
     if os.path.exists(best_path + ".zip"):
-        return DQN.load(best_path), best_path + ".zip"
+        return SAC.load(best_path), best_path + ".zip"
     return model, model_path + ".zip"
 
 
@@ -472,7 +489,7 @@ def demo(model, env_config, run_dir, num_episodes):
         env,
         video_folder=video_folder,
         episode_trigger=lambda e: True,
-        name_prefix="dqn_intersection",
+        name_prefix="sac_intersection",
     )
     env.unwrapped.set_record_video_wrapper(env)
 
@@ -489,7 +506,7 @@ def demo(model, env_config, run_dir, num_episodes):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="DQN agent for intersection env")
+    parser = argparse.ArgumentParser(description="SAC agent for intersection env")
     parser.add_argument("--demo-only", action="store_true", help="Skip training, demo existing model")
     parser.add_argument("--config", type=str, default=None, help="Path to JSON config with overrides")
     parser.add_argument("--model-path", type=str, default=None,
@@ -524,7 +541,7 @@ def main():
 
         load_path = model_file[:-4]  # strip .zip for SB3
         print(f"Loading model from {model_file}")
-        model = DQN.load(load_path)
+        model = SAC.load(load_path)
 
         demo_episodes = config.get("demo_episodes", 3)
         demo(model, config["env"], run_dir, demo_episodes)

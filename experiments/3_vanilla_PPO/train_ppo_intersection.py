@@ -1,18 +1,13 @@
 """
-DQN with Social Attention for Highway-env Intersection
+PPO Agent for Highway-env Intersection
 
-Trains a DQN agent using the EgoAttention architecture from:
-    "Social Attention for Autonomous Decision-Making in Dense Traffic"
-    (Leurent & Mercat, 2019)
-
-The attention mechanism lets the ego vehicle learn which nearby vehicles
-are most relevant for its decision, producing a permutation-invariant
-and interpretable policy.
+Trains a PPO agent (stable-baselines3) to navigate the intersection
+environment, then demonstrates the trained policy with video recording.
 
 Usage:
-    python train_social_attention_dqn.py                        # Train with default config
-    python train_social_attention_dqn.py --config override.json  # Train with overrides
-    python train_social_attention_dqn.py --demo-only --run-dir data/runs/<run>
+    python train_ppo_intersection.py                        # Train with default config
+    python train_ppo_intersection.py --config override.json  # Train with overrides
+    python train_ppo_intersection.py --demo-only --model-path data/runs/<run>/models/best/best_model.zip --config <config>
 """
 import gymnasium as gym
 from gymnasium.wrappers import RecordVideo
@@ -26,33 +21,12 @@ from datetime import datetime
 import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-from stable_baselines3 import DQN
+from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import BaseCallback, EvalCallback, CallbackList
 from stable_baselines3.common.monitor import Monitor
 
-from social_attention_model import SocialAttentionExtractor
 
-# ---------------------------------------------------------------------------
-# Paths
-# ---------------------------------------------------------------------------
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-
-# ---------------------------------------------------------------------------
-# Social Attention model config  (matches ego_attention_2h.json from rl-agents)
-# ---------------------------------------------------------------------------
-POLICY_KWARGS = dict(
-    features_extractor_class=SocialAttentionExtractor,
-    features_extractor_kwargs=dict(
-        embedding_layers=[64, 64],
-        others_embedding_layers=[64, 64],
-        attention_feature_size=64,
-        attention_heads=2,
-        self_attention=False,
-        output_layers=[64, 64],
-        presence_feature_idx=0,
-    ),
-    net_arch=[],  # no extra MLP — output_layer is inside the extractor
-)
 
 
 # ---------------------------------------------------------------------------
@@ -69,8 +43,6 @@ def load_config(config_path=None):
             overrides = json.load(f)
         for key, value in overrides.items():
             if key == "env":
-                # Shallow-merge env: only override top-level env keys,
-                # leave observation/action sub-dicts untouched
                 for env_key, env_value in value.items():
                     config["env"][env_key] = env_value
             else:
@@ -88,16 +60,12 @@ def make_run_dir(config):
     run_dir = os.path.join(data_dir, "runs", run_name)
     os.makedirs(run_dir, exist_ok=True)
 
-    # Save merged config for reproducibility
     with open(os.path.join(run_dir, "config.json"), "w") as f:
         json.dump(config, f, indent=2)
 
     return run_dir
 
 
-# ---------------------------------------------------------------------------
-# Training plot callback  (same as experiment 2)
-# ---------------------------------------------------------------------------
 class TrainingPlotCallback(BaseCallback):
     """Saves a training progress plot each time SB3 logs verbose output."""
 
@@ -163,7 +131,6 @@ class TrainingPlotCallback(BaseCallback):
             vertical_spacing=0.08,
         )
 
-        # --- Episode Reward ---
         fig.add_trace(go.Scatter(
             x=episodes, y=self.ep_rewards, mode="lines",
             name="Reward", opacity=0.3, line=dict(color="royalblue"),
@@ -176,7 +143,6 @@ class TrainingPlotCallback(BaseCallback):
             hovertemplate="Ep %{x}<br>Mean: %{y:.2f}<extra></extra>",
         ), row=1, col=1)
 
-        # --- Episode Length ---
         fig.add_trace(go.Scatter(
             x=episodes, y=self.ep_lengths, mode="lines",
             name="Length", opacity=0.3, line=dict(color="darkorange"),
@@ -189,7 +155,6 @@ class TrainingPlotCallback(BaseCallback):
             hovertemplate="Ep %{x}<br>Mean: %{y:.1f}<extra></extra>",
         ), row=2, col=1)
 
-        # --- Loss ---
         if self.losses:
             fig.add_trace(go.Scatter(
                 x=self.loss_steps, y=self.losses, mode="lines",
@@ -213,7 +178,7 @@ class TrainingPlotCallback(BaseCallback):
         desc = self.config.get("description", "default")
         fig.update_layout(
             title=(
-                f"Social Attention DQN — {desc}<br>"
+                f"Vanilla PPO — {desc}<br>"
                 f"<sup>{subtitle}</sup>"
             ),
             height=900, width=1000,
@@ -247,59 +212,151 @@ class TrainingPlotCallback(BaseCallback):
                 writer.writerow([ts, loss])
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
+class EvalMetricsWrapper(gym.Wrapper):
+    """Tracks crash and arrival counts on the eval env."""
+
+    def __init__(self, env):
+        super().__init__(env)
+        self.crash_count = 0
+        self.arrive_count = 0
+        self.episode_count = 0
+
+    def step(self, action):
+        obs, reward, terminated, truncated, info = self.env.step(action)
+        if terminated or truncated:
+            self.episode_count += 1
+            if info.get("crashed", False):
+                self.crash_count += 1
+            if info.get("rewards", {}).get("arrived_reward", 0) > 0:
+                self.arrive_count += 1
+        return obs, reward, terminated, truncated, info
+
+
+class EvalLogCallback(BaseCallback):
+    """Logs each EvalCallback evaluation to training_eval_log.csv.
+
+    Used as ``callback_after_eval`` on an EvalCallback so that
+    ``self.parent`` is the EvalCallback instance.
+    """
+
+    def __init__(self, log_path, eval_metrics):
+        super().__init__()
+        self.log_path = log_path
+        self.eval_metrics = eval_metrics
+        self._header_written = False
+        self._prev_best = -np.inf
+        self._prev_episodes = 0
+        self._prev_crashes = 0
+        self._prev_arrivals = 0
+
+    def _on_step(self):
+        eval_cb = self.parent
+        mean_reward = eval_cb.last_mean_reward
+        std_reward = float(np.std(eval_cb.evaluations_results[-1]))
+        mean_length = float(np.mean(eval_cb.evaluations_length[-1]))
+        best_mean = eval_cb.best_mean_reward
+
+        model_saved = "best_model" if best_mean > self._prev_best else ""
+        self._prev_best = best_mean
+
+        episodes = self.eval_metrics.episode_count - self._prev_episodes
+        crashes = self.eval_metrics.crash_count - self._prev_crashes
+        arrivals = self.eval_metrics.arrive_count - self._prev_arrivals
+        self._prev_episodes = self.eval_metrics.episode_count
+        self._prev_crashes = self.eval_metrics.crash_count
+        self._prev_arrivals = self.eval_metrics.arrive_count
+
+        crash_pct = f"{100 * crashes / episodes:.0f}%" if episodes > 0 else ""
+        arrive_pct = f"{100 * arrivals / episodes:.0f}%" if episodes > 0 else ""
+
+        with open(self.log_path, "a", newline="") as f:
+            writer = csv.writer(f)
+            if not self._header_written:
+                writer.writerow([
+                    "timestep", "mean_reward", "std_reward",
+                    "mean_length", "best_mean_reward", "model_saved",
+                    "crash_rate", "arrival_rate",
+                ])
+                self._header_written = True
+            writer.writerow([
+                self.num_timesteps,
+                f"{mean_reward:.2f}",
+                f"{std_reward:.2f}",
+                f"{mean_length:.1f}",
+                f"{best_mean:.2f}",
+                model_saved,
+                crash_pct,
+                arrive_pct,
+            ])
+        return True
+
+
+def apply_idm_params(idm_config):
+    """Apply IDM behavior parameters to the vehicle class before env creation."""
+    from highway_env.vehicle.behavior import IDMVehicle
+    if "comfort_acc_max" in idm_config:
+        IDMVehicle.COMFORT_ACC_MAX = idm_config["comfort_acc_max"]
+    if "comfort_acc_min" in idm_config:
+        IDMVehicle.COMFORT_ACC_MIN = idm_config["comfort_acc_min"]
+    if "distance_wanted" in idm_config:
+        IDMVehicle.DISTANCE_WANTED = idm_config["distance_wanted"]
+    if "time_wanted" in idm_config:
+        IDMVehicle.TIME_WANTED = idm_config["time_wanted"]
+
+
 def make_env(env_config):
     return gym.make("intersection-v1", render_mode="rgb_array", config=env_config)
 
 
-# ---------------------------------------------------------------------------
-# Train
-# ---------------------------------------------------------------------------
 def train(config, run_dir):
     env_config = config["env"]
     train_timesteps = config["train_timesteps"]
     eval_freq = config.get("eval_freq", 5000)
 
-    model_path = os.path.join(run_dir, "models", "social_attention_dqn")
+    model_path = os.path.join(run_dir, "models", "final_model")
     best_model_dir = os.path.join(run_dir, "models", "best")
     plot_path = os.path.join(run_dir, "training_progress.html")
     episodes_csv = os.path.join(run_dir, "episodes.csv")
     losses_csv = os.path.join(run_dir, "losses.csv")
 
-    print("=== Training Social Attention DQN on Intersection ===")
+    print("=== Training PPO on Intersection ===")
     print(f"Timesteps: {train_timesteps}")
     print(f"Run dir:   {run_dir}")
     print()
 
-    env = make_env(env_config)
-    eval_env = Monitor(make_env(env_config))
+    mc = config.get("model", {})
 
-    model = DQN(
+    env = make_env(env_config)
+    eval_metrics = EvalMetricsWrapper(make_env(env_config))
+    eval_env = Monitor(eval_metrics)
+
+    model = PPO(
         "MlpPolicy",
         env,
-        policy_kwargs=POLICY_KWARGS,
-        learning_rate=5e-4,
-        buffer_size=15_000,
-        learning_starts=200,
-        batch_size=64,
-        gamma=0.95,
-        train_freq=1,
-        target_update_interval=512,
-        exploration_fraction=0.3,
-        exploration_final_eps=0.05,
+        policy_kwargs=dict(net_arch=mc.get("net_arch", [256, 256])),
+        learning_rate=mc.get("learning_rate", 5e-4),
+        n_steps=mc.get("n_steps", 256),
+        batch_size=mc.get("batch_size", 64),
+        n_epochs=mc.get("n_epochs", 10),
+        gamma=mc.get("gamma", 0.8),
+        gae_lambda=mc.get("gae_lambda", 0.95),
+        clip_range=mc.get("clip_range", 0.2),
         verbose=1,
     )
 
+    eval_log_csv = os.path.join(run_dir, "training_eval_log.csv")
+
     plot_cb = TrainingPlotCallback(plot_path, episodes_csv, losses_csv, config)
+    eval_log_cb = EvalLogCallback(eval_log_csv, eval_metrics)
     eval_cb = EvalCallback(
         eval_env,
         best_model_save_path=best_model_dir,
+        log_path=best_model_dir,
         eval_freq=eval_freq,
-        n_eval_episodes=10,
+        n_eval_episodes=config.get("eval_episodes", 10),
         deterministic=True,
         verbose=1,
+        callback_after_eval=eval_log_cb,
     )
     model.learn(
         total_timesteps=train_timesteps,
@@ -317,13 +374,10 @@ def train(config, run_dir):
 
     best_path = os.path.join(best_model_dir, "best_model")
     if os.path.exists(best_path + ".zip"):
-        return DQN.load(best_path)
-    return model
+        return PPO.load(best_path), best_path + ".zip"
+    return model, model_path + ".zip"
 
 
-# ---------------------------------------------------------------------------
-# Demo
-# ---------------------------------------------------------------------------
 def run_episodes(model, env, num_episodes):
     """Run episodes and return per-episode results."""
     results = []
@@ -355,11 +409,13 @@ def run_episodes(model, env, num_episodes):
     return results
 
 
-def evaluate(model, env_config, run_dir, num_episodes):
+def evaluate(model, env_config, run_dir, num_episodes, model_path=None):
     eval_csv = os.path.join(run_dir, "evaluation.csv")
 
     print()
     print(f"=== Evaluating Trained Agent ({num_episodes} episodes) ===")
+    if model_path:
+        print(f"Model: {model_path}")
     print()
 
     env = make_env(env_config)
@@ -367,6 +423,8 @@ def evaluate(model, env_config, run_dir, num_episodes):
     env.close()
 
     with open(eval_csv, "w", newline="") as f:
+        if model_path:
+            f.write(f"# model: {model_path}\n")
         writer = csv.DictWriter(f, fieldnames=["episode", "steps", "reward", "crashed", "arrived"])
         writer.writeheader()
         writer.writerows(results)
@@ -404,7 +462,7 @@ def demo(model, env_config, run_dir, num_episodes):
         env,
         video_folder=video_folder,
         episode_trigger=lambda e: True,
-        name_prefix="social_attn_dqn",
+        name_prefix="ppo_intersection",
     )
     env.unwrapped.set_record_video_wrapper(env)
 
@@ -420,57 +478,54 @@ def demo(model, env_config, run_dir, num_episodes):
     print("Done!")
 
 
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
 def main():
-    parser = argparse.ArgumentParser(
-        description="Social Attention DQN for intersection env"
-    )
-    parser.add_argument(
-        "--demo-only", action="store_true",
-        help="Skip training, demo existing model"
-    )
-    parser.add_argument(
-        "--config", type=str, default=None,
-        help="Path to JSON config with overrides"
-    )
-    parser.add_argument(
-        "--run-dir", type=str, default=None,
-        help="Path to existing run dir (for --demo-only)"
-    )
+    parser = argparse.ArgumentParser(description="PPO agent for intersection env")
+    parser.add_argument("--demo-only", action="store_true", help="Skip training, demo existing model")
+    parser.add_argument("--config", type=str, default=None, help="Path to JSON config with overrides")
+    parser.add_argument("--model-path", type=str, default=None,
+                        help="Path to a .zip model file (for --demo-only)")
     args = parser.parse_args()
 
     if args.demo_only:
-        if args.run_dir:
-            run_dir = args.run_dir
-            run_config_path = os.path.join(run_dir, "config.json")
-            with open(run_config_path) as f:
-                config = json.load(f)
-        else:
-            config = load_config(args.config)
-            run_dir = os.path.join(SCRIPT_DIR, "data")
+        if not args.model_path:
+            parser.error("--demo-only requires --model-path")
+        if not args.config:
+            parser.error("--demo-only requires --config")
 
-        best_path = os.path.join(run_dir, "models", "best", "best_model")
-        final_path = os.path.join(run_dir, "models", "social_attention_dqn")
-        if os.path.exists(best_path + ".zip"):
-            print(f"Loading best model from {best_path}.zip")
-            model = DQN.load(best_path)
-        elif os.path.exists(final_path + ".zip"):
-            print(f"Loading final model from {final_path}.zip")
-            model = DQN.load(final_path)
-        else:
-            print(f"Error: No model found in {run_dir}/models/")
+        model_file = args.model_path
+        if not model_file.endswith(".zip"):
+            model_file += ".zip"
+        if not os.path.exists(model_file):
+            print(f"Error: Model not found: {model_file}")
             return
+
+        # Derive run_dir by walking up to the parent of "models/"
+        p = os.path.dirname(os.path.abspath(model_file))
+        run_dir = p  # fallback
+        while p != os.path.dirname(p):
+            if os.path.basename(p) == "models":
+                run_dir = os.path.dirname(p)
+                break
+            p = os.path.dirname(p)
+
+        config = load_config(args.config)
+        if config.get("idm"):
+            apply_idm_params(config["idm"])
+
+        load_path = model_file[:-4]  # strip .zip for SB3
+        print(f"Loading model from {model_file}")
+        model = PPO.load(load_path)
 
         demo_episodes = config.get("demo_episodes", 3)
         demo(model, config["env"], run_dir, demo_episodes)
     else:
         config = load_config(args.config)
+        if config.get("idm"):
+            apply_idm_params(config["idm"])
         run_dir = make_run_dir(config)
-        model = train(config, run_dir)
+        model, best_model_path = train(config, run_dir)
         eval_episodes = config.get("eval_episodes", 20)
-        evaluate(model, config["env"], run_dir, eval_episodes)
+        evaluate(model, config["env"], run_dir, eval_episodes, model_path=best_model_path)
         if config.get("demo_on_train_end", True):
             demo_episodes = config.get("demo_episodes", 3)
             demo(model, config["env"], run_dir, demo_episodes)

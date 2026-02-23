@@ -10,11 +10,38 @@ import gymnasium as gym
 from gymnasium.wrappers import RecordVideo
 import highway_env
 import os
+import json
 import shutil
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
+
+def load_config():
+    """Load config from default_config.json in script dir."""
+    default_path = os.path.join(SCRIPT_DIR, "default_config.json")
+    with open(default_path) as f:
+        return json.load(f)
+
+
+def apply_idm_params(idm_config):
+    """Apply IDM behavior parameters to the vehicle class before env creation."""
+    from highway_env.vehicle.behavior import IDMVehicle
+    if "comfort_acc_max" in idm_config:
+        IDMVehicle.COMFORT_ACC_MAX = idm_config["comfort_acc_max"]
+    if "comfort_acc_min" in idm_config:
+        IDMVehicle.COMFORT_ACC_MIN = idm_config["comfort_acc_min"]
+    if "distance_wanted" in idm_config:
+        IDMVehicle.DISTANCE_WANTED = idm_config["distance_wanted"]
+    if "time_wanted" in idm_config:
+        IDMVehicle.TIME_WANTED = idm_config["time_wanted"]
+
+
 def main():
+    config = load_config()
+    if config.get("idm"):
+        apply_idm_params(config["idm"])
+    env_config = config["env"]
+
     # Clean up previous video folder
     video_folder = os.path.join(SCRIPT_DIR, "data", "videos")
     if os.path.exists(video_folder):
@@ -22,23 +49,7 @@ def main():
     os.makedirs(video_folder, exist_ok=True)
 
     # Create the intersection environment
-    env = gym.make('intersection-v1', render_mode='rgb_array', config={
-        "observation": {
-            "type": "Kinematics",
-            "vehicles_count": 15,
-            "features": ["presence", "x", "y", "vx", "vy", "cos_h", "sin_h"],
-            "absolute": True,
-        },
-        "action": {
-            "type": "DiscreteMetaAction",
-            "target_speeds": [0, 2, 5, 10, 15, 20],  # Speed levels for FASTER/SLOWER
-        },
-        "duration": 100,              # Episode lasts 13 seconds (simulation time)                                                                                                                                 
-        "destination": "o1",         # Target exit (o0=west, o1=north, o2=east, o3=south)                                                                                                                         
-        "initial_vehicle_count": 10, # Start with 10 other vehicles                                                                                                                                               
-        "spawn_probability": 0.6,    # 60% chance to spawn new vehicle each step  
-        "policy_frequency": 5,  # 5 decisions per simulation second                                                                                                                                           
-    })
+    env = gym.make('intersection-v1', render_mode='rgb_array', config=env_config)
 
     # Wrap with RecordVideo to capture video
     env = RecordVideo(
@@ -59,11 +70,14 @@ def main():
 
     obs, info = env.reset()
 
-    # Set custom initial speed (must set all three for it to stick)
-    vehicle = env.unwrapped.vehicle
-    vehicle.speed = 1.0                      # Current speed (m/s)
-    vehicle.speed_index = 2                  # Index into target_speeds [0, 2, 5, 10, 15, 20]
-    vehicle.target_speed = 3.0               # Must match target_speeds[speed_index]
+    # Reposition ego closer to the intersection (lane is 100m, default start is 60m)
+    vehicle = env.unwrapped.controlled_vehicles[0]
+    lane = vehicle.lane
+    ego_position = 95.0  # meters along the incoming lane (100 = intersection edge)
+    vehicle.position = lane.position(ego_position, 0)
+    vehicle.heading = lane.heading_at(ego_position)
+    vehicle.speed = 0.0
+    vehicle.target_speed = 0.0
     
     done = False
     total_reward = 0

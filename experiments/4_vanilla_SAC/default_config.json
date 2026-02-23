@@ -7,13 +7,13 @@
   "demo_on_train_end": false,
   "model": {
     "net_arch": [256, 256],
-    "learning_rate": 5e-4,
+    "learning_rate": 3e-4,
     "buffer_size": 15000,
     "learning_starts": 200,
-    "batch_size": 32,
+    "batch_size": 256,
     "gamma": 0.8,
-    "train_freq": 1,
-    "target_update_interval": 50
+    "tau": 0.005,
+    "train_freq": 1
   },
   "env": {
     "observation": {
@@ -27,6 +27,7 @@
       "type": "DiscreteMetaAction",
       "target_speeds": [0, 2, 5, 10, 15, 20]
     },
+    "max_speed": 10,
     "duration": 100,
     "destination": "o1",
     "initial_vehicle_count": 10,
