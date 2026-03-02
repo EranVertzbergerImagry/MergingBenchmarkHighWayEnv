@@ -1,0 +1,9 @@
+{
+  "description": "rl_agents_ego_attention_10K_episodes",
+  "env_config_path": "configs/env.json",
+  "agent_config_path": "configs/agents/ego_attention_2h.json",
+  "train_episodes": 10000,
+  "eval_episodes": 100,
+  "demo_episodes": 10,
+  "demo_on_train_end": true
+}
