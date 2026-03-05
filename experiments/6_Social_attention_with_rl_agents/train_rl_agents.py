@@ -327,9 +327,10 @@ def run_episodes(agent, env, num_episodes):
     return results
 
 
-def evaluate_agent(agent, env_config_path, run_dir, num_episodes):
+def evaluate_agent(agent, env_config_path, run_dir, num_episodes, eval_csv=None):
     """Post-training evaluation writing evaluation.csv with SUMMARY row."""
-    eval_csv = os.path.join(run_dir, "evaluation.csv")
+    if eval_csv is None:
+        eval_csv = os.path.join(run_dir, "evaluation.csv")
 
     print()
     print(f"=== Evaluating Trained Agent ({num_episodes} episodes) ===")
@@ -531,6 +532,10 @@ def main():
         help="Skip training and evaluation, just record demo videos",
     )
     parser.add_argument(
+        "--evaluation-only", action="store_true",
+        help="Skip training, evaluate existing checkpoint and save timestamped CSV",
+    )
+    parser.add_argument(
         "--visualize", action="store_true",
         help="Enable rl-agents built-in attention overlay (render_mode='human')",
     )
@@ -544,9 +549,9 @@ def main():
     env_config_path = os.path.join(SCRIPT_DIR, config["env_config_path"])
     agent_config_path = os.path.join(SCRIPT_DIR, config["agent_config_path"])
 
-    if args.test_only or args.demo_only:
+    if args.test_only or args.demo_only or args.evaluation_only:
         if not args.recover_from:
-            parser.error("--test-only / --demo-only requires --recover-from <checkpoint.tar>")
+            parser.error("--test-only / --demo-only / --evaluation-only requires --recover-from <checkpoint.tar>")
         if not os.path.exists(args.recover_from):
             print(f"Error: Checkpoint not found: {args.recover_from}")
             return
@@ -571,6 +576,12 @@ def main():
         elif args.demo_only:
             demo_episodes = config.get("demo_episodes", 3)
             demo(agent, env_config_path, demo_episodes)
+        elif args.evaluation_only:
+            timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+            eval_csv = os.path.join(run_dir, f"evaluation_{timestamp}.csv")
+            eval_episodes = config.get("eval_episodes", 100)
+            evaluate_agent(agent, env_config_path, run_dir, eval_episodes,
+                           eval_csv=eval_csv)
         else:
             eval_episodes = config.get("eval_episodes", 100)
             evaluate_agent(agent, env_config_path, run_dir, eval_episodes)

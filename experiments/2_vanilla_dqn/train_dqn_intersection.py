@@ -419,8 +419,9 @@ def run_episodes(model, env, num_episodes):
     return results
 
 
-def evaluate(model, env_config, run_dir, num_episodes, model_path=None):
-    eval_csv = os.path.join(run_dir, "evaluation.csv")
+def evaluate(model, env_config, run_dir, num_episodes, model_path=None, eval_csv=None):
+    if eval_csv is None:
+        eval_csv = os.path.join(run_dir, "evaluation.csv")
 
     print()
     print(f"=== Evaluating Trained Agent ({num_episodes} episodes) ===")
@@ -491,9 +492,11 @@ def demo(model, env_config, run_dir, num_episodes):
 def main():
     parser = argparse.ArgumentParser(description="DQN agent for intersection env")
     parser.add_argument("--demo-only", action="store_true", help="Skip training, demo existing model")
+    parser.add_argument("--evaluation-only", action="store_true",
+                        help="Skip training, evaluate existing model and save timestamped CSV")
     parser.add_argument("--config", type=str, default=None, help="Path to JSON config with overrides")
     parser.add_argument("--model-path", type=str, default=None,
-                        help="Path to a .zip model file (for --demo-only)")
+                        help="Path to a .zip model file (for --demo-only or --evaluation-only)")
     args = parser.parse_args()
 
     if args.demo_only:
@@ -528,6 +531,41 @@ def main():
 
         demo_episodes = config.get("demo_episodes", 3)
         demo(model, config["env"], run_dir, demo_episodes)
+    elif args.evaluation_only:
+        if not args.model_path:
+            parser.error("--evaluation-only requires --model-path")
+        if not args.config:
+            parser.error("--evaluation-only requires --config")
+
+        model_file = args.model_path
+        if not model_file.endswith(".zip"):
+            model_file += ".zip"
+        if not os.path.exists(model_file):
+            print(f"Error: Model not found: {model_file}")
+            return
+
+        # Derive run_dir by walking up to the parent of "models/"
+        p = os.path.dirname(os.path.abspath(model_file))
+        run_dir = p  # fallback
+        while p != os.path.dirname(p):
+            if os.path.basename(p) == "models":
+                run_dir = os.path.dirname(p)
+                break
+            p = os.path.dirname(p)
+
+        config = load_config(args.config)
+        if config.get("idm"):
+            apply_idm_params(config["idm"])
+
+        load_path = model_file[:-4]  # strip .zip for SB3
+        print(f"Loading model from {model_file}")
+        model = DQN.load(load_path)
+
+        timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        eval_csv = os.path.join(run_dir, f"evaluation_{timestamp}.csv")
+        eval_episodes = config.get("eval_episodes", 20)
+        evaluate(model, config["env"], run_dir, eval_episodes,
+                 model_path=model_file, eval_csv=eval_csv)
     else:
         config = load_config(args.config)
         if config.get("idm"):
