@@ -11,7 +11,9 @@ arrive percentage: 50-40%
 
 video example:
 
-<video src="https://raw.githubusercontent.com/EranVertzbergerImagry/MergingBenchmarkHighWayEnv/modified_env_and_RL_algos_implementation/ExperimentDocumentation/random_policy_example.mp4" controls width="600"></video>
+[random_policy_example.mp4](https://github.com/EranVertzbergerImagry/MergingBenchmarkHighWayEnv/blob/modified_env_and_RL_algos_implementation/ExperimentDocumentation/random_policy_example.mp4)
+
+<video src="random_policy_example.mp4" controls width="600"></video>
 
 2. We start off experimenting with off-the shelf models in the gymnasium models. The environment was kept constant in terms of observation and action.
 
@@ -37,24 +39,34 @@ This approach was implemented using the gymnasium library in experiment 5 and us
 experiment 5: crash-21%, arrive-72%. we do see that the agent learns to stop and yield and choose the correct moment to enter the junction:
 video example:
 
-<video src="https://raw.githubusercontent.com/EranVertzbergerImagry/MergingBenchmarkHighWayEnv/modified_env_and_RL_algos_implementation/ExperimentDocumentation/social_attn_dqn_example.mp4" controls width="600"></video>
+[social_attn_dqn_example.mp4](https://github.com/EranVertzbergerImagry/MergingBenchmarkHighWayEnv/blob/modified_env_and_RL_algos_implementation/ExperimentDocumentation/social_attn_dqn_example.mp4)
+
+<video src="social_attn_dqn_example.mp4" controls width="600"></video>
 
 experiment 6: crash-12%, arrive-80%. The visualization shows the attention calculated for each agent and the probability for each decision.:
 video example:
 
-<video src="https://raw.githubusercontent.com/EranVertzbergerImagry/MergingBenchmarkHighWayEnv/modified_env_and_RL_algos_implementation/ExperimentDocumentation/rl_agents_ego_attn_example.mp4" controls width="600"></video>
+[rl_agents_ego_attn_example.mp4](https://github.com/EranVertzbergerImagry/MergingBenchmarkHighWayEnv/blob/modified_env_and_RL_algos_implementation/ExperimentDocumentation/rl_agents_ego_attn_example.mp4)
+
+<video src="rl_agents_ego_attn_example.mp4" controls width="600"></video>
 
 when crashes occure, in all examined cases, the cause is other agents crashing in to the EGO
 video example:
 
-<video src="https://raw.githubusercontent.com/EranVertzbergerImagry/MergingBenchmarkHighWayEnv/modified_env_and_RL_algos_implementation/ExperimentDocumentation/rl_agents_ego_attn_crash_example.mp4" controls width="600"></video>
+[rl_agents_ego_attn_crash_example.mp4](https://github.com/EranVertzbergerImagry/MergingBenchmarkHighWayEnv/blob/modified_env_and_RL_algos_implementation/ExperimentDocumentation/rl_agents_ego_attn_crash_example.mp4)
+
+<video src="rl_agents_ego_attn_crash_example.mp4" controls width="600"></video>
 
 training was performed only on the left turn scenario, it seems agent learns to generelize to straight and right turns also.
 
 right turn example:
 
-<video src="https://raw.githubusercontent.com/EranVertzbergerImagry/MergingBenchmarkHighWayEnv/modified_env_and_RL_algos_implementation/ExperimentDocumentation/rl_agents_ego_attn_right_turn_example.mp4" controls width="600"></video>
+[rl_agents_ego_attn_right_turn_example.mp4](https://github.com/EranVertzbergerImagry/MergingBenchmarkHighWayEnv/blob/modified_env_and_RL_algos_implementation/ExperimentDocumentation/rl_agents_ego_attn_right_turn_example.mp4)
+
+<video src="rl_agents_ego_attn_right_turn_example.mp4" controls width="600"></video>
 
 straight example:
 
-<video src="https://raw.githubusercontent.com/EranVertzbergerImagry/MergingBenchmarkHighWayEnv/modified_env_and_RL_algos_implementation/ExperimentDocumentation/rl_agents_ego_attn_straight_example.mp4" controls width="600"></video>
+[rl_agents_ego_attn_straight_example.mp4](https://github.com/EranVertzbergerImagry/MergingBenchmarkHighWayEnv/blob/modified_env_and_RL_algos_implementation/ExperimentDocumentation/rl_agents_ego_attn_straight_example.mp4)
+
+<video src="rl_agents_ego_attn_straight_example.mp4" controls width="600"></video>
