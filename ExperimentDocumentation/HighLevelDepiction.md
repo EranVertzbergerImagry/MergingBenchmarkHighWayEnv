@@ -11,7 +11,7 @@ arrive percentage: 50-40%
 
 video example:
 
-https://github.com/user-attachments/assets/random_policy_example.mp4
+https://github.com/EranVertzbergerImagry/MergingBenchmarkHighWayEnv/raw/modified_env_and_RL_algos_implementation/ExperimentDocumentation/random_policy_example.mp4
 
 <video src="random_policy_example.mp4" controls width="600"></video>
 
@@ -39,15 +39,21 @@ This approach was implemented using the gymnasium library in experiment 5 and us
 experiment 5: crash-21%, arrive-72%. we do see that the agent learns to stop and yield and choose the correct moment to enter the junction: 
 video example: 
 
+https://github.com/EranVertzbergerImagry/MergingBenchmarkHighWayEnv/raw/modified_env_and_RL_algos_implementation/ExperimentDocumentation/social_attn_dqn_example.mp4
+
 <video src="social_attn_dqn_example.mp4" controls width="600"></video>
 
 experiment 6: crash-12%, arrive-80%. The visualization shows the attention calculated for each agent and the probability for each decision.: 
 video example: 
 
+https://github.com/EranVertzbergerImagry/MergingBenchmarkHighWayEnv/raw/modified_env_and_RL_algos_implementation/ExperimentDocumentation/rl_agents_ego_attn_example.mp4
+
 <video src="rl_agents_ego_attn_example.mp4" controls width="600"></video>
 
 when crashes occure, in all examined cases, the cause is other agents crashing in to the EGO 
 video example: 
+
+https://github.com/EranVertzbergerImagry/MergingBenchmarkHighWayEnv/raw/modified_env_and_RL_algos_implementation/ExperimentDocumentation/rl_agents_ego_attn_crash_example.mp4
 
 <video src="rl_agents_ego_attn_crash_example.mp4" controls width="600"></video>
 
@@ -55,10 +61,12 @@ training was performed only on the left turn scenario, it seems agent learns to 
 
 right turn example:
 
+https://github.com/EranVertzbergerImagry/MergingBenchmarkHighWayEnv/raw/modified_env_and_RL_algos_implementation/ExperimentDocumentation/rl_agents_ego_attn_right_turn_example.mp4
+
 <video src="rl_agents_ego_attn_right_turn_example.mp4" controls width="600"></video>
 
 straight example: 
 
+https://github.com/EranVertzbergerImagry/MergingBenchmarkHighWayEnv/raw/modified_env_and_RL_algos_implementation/ExperimentDocumentation/rl_agents_ego_attn_straight_example.mp4
+
 <video src="rl_agents_ego_attn_straight_example.mp4" controls width="600"></video>
-
-
