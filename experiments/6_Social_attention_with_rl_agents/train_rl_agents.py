@@ -112,14 +112,20 @@ class TrainingTracker:
 
     Passed to ``Evaluation(step_callback_fn=tracker.step_callback)``.
     Accumulates per-step rewards and writes a row on episode end.
+    Optionally updates a training_progress.html plot every ``plot_interval`` episodes.
     """
 
-    def __init__(self, episodes_csv):
+    def __init__(self, episodes_csv, plot_path=None, description="",
+                 plot_interval=50):
         self.episodes_csv = episodes_csv
+        self.plot_path = plot_path
+        self.description = description
+        self.plot_interval = plot_interval
         self._ep_reward = 0.0
         self._ep_steps = 0
         self._current_ep = -1
         self._header_written = False
+        self._last_plot_ep = 0
 
     def step_callback(self, episode, env, agent, transition, writer):
         obs, reward, terminated, truncated, info = transition
@@ -142,6 +148,7 @@ class TrainingTracker:
                 episode + 1, self._ep_reward, self._ep_steps,
                 crashed, arrived,
             )
+            self._maybe_update_plot(episode + 1)
 
     def _write_row(self, episode, reward, length, crashed, arrived):
         with open(self.episodes_csv, "a", newline="") as f:
@@ -151,12 +158,29 @@ class TrainingTracker:
                 self._header_written = True
             writer.writerow([episode, f"{reward:.4f}", length, crashed, arrived])
 
+    def _maybe_update_plot(self, episode):
+        if self.plot_path and episode >= self._last_plot_ep + self.plot_interval:
+            self._last_plot_ep = episode
+            try:
+                generate_training_plot(
+                    self.episodes_csv, self.plot_path,
+                    description=self.description, auto_refresh=True,
+                )
+            except Exception:
+                pass
+
 
 # ---------------------------------------------------------------------------
 # Training plot generation
 # ---------------------------------------------------------------------------
-def generate_training_plot(episodes_csv, plot_path, description="", window=50):
-    """Read episodes.csv and generate an interactive Plotly HTML chart."""
+def generate_training_plot(episodes_csv, plot_path, description="", window=50,
+                           auto_refresh=False):
+    """Read episodes.csv and generate an interactive Plotly HTML chart.
+
+    Args:
+        auto_refresh: If True, inject a <meta> tag that refreshes the browser
+                      every 30 seconds (useful during training).
+    """
     if not HAS_PLOTLY:
         print("  (plotly not installed — skipping training plot)")
         return
@@ -233,8 +257,12 @@ def generate_training_plot(episodes_csv, plot_path, description="", window=50):
     )
 
     os.makedirs(os.path.dirname(plot_path), exist_ok=True)
+    html = fig.to_html()
+    if auto_refresh:
+        html = html.replace("<head>",
+                            '<head><meta http-equiv="refresh" content="30">', 1)
     with open(plot_path, "w") as f:
-        f.write(fig.to_html())
+        f.write(html)
     print(f"  Training plot saved to {plot_path}")
 
 
@@ -259,7 +287,11 @@ def train(config, run_dir, visualize=False):
     env = load_environment(env_config_path)
     agent = load_agent(load_agent_config(agent_config_path), env)
 
-    tracker = TrainingTracker(episodes_csv)
+    tracker = TrainingTracker(
+        episodes_csv,
+        plot_path=plot_path,
+        description=config.get("description", ""),
+    )
 
     # Evaluation puts all outputs (checkpoints, TensorBoard, videos, metadata)
     # into directory/run_directory.
@@ -282,7 +314,7 @@ def train(config, run_dir, visualize=False):
     print()
     print(f"  episodes.csv written to {episodes_csv}")
 
-    # Generate training plot from episodes.csv
+    # Final plot without auto-refresh
     generate_training_plot(
         episodes_csv, plot_path,
         description=config.get("description", ""),

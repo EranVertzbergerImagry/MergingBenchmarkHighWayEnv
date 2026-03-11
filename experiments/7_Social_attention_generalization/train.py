@@ -157,7 +157,11 @@ def train(config, run_dir, visualize=False):
     env = make_env(env_config)
     agent = load_agent(load_agent_config(agent_config), env)
 
-    tracker = TrainingTracker(episodes_csv)
+    tracker = TrainingTracker(
+        episodes_csv,
+        plot_path=plot_path,
+        description=config.get("description", ""),
+    )
 
     evaluation = Evaluation(
         env,
@@ -178,6 +182,7 @@ def train(config, run_dir, visualize=False):
     print()
     print(f"  episodes.csv written to {episodes_csv}")
 
+    # Final plot without auto-refresh
     generate_training_plot(
         episodes_csv, plot_path,
         description=config.get("description", ""),

@@ -12,8 +12,14 @@ except ImportError:
     HAS_PLOTLY = False
 
 
-def generate_training_plot(episodes_csv, plot_path, description="", window=50):
-    """Read episodes.csv and generate an interactive Plotly HTML chart."""
+def generate_training_plot(episodes_csv, plot_path, description="", window=50,
+                           auto_refresh=False):
+    """Read episodes.csv and generate an interactive Plotly HTML chart.
+
+    Args:
+        auto_refresh: If True, inject a <meta> tag that refreshes the browser
+                      every 30 seconds (useful during training).
+    """
     if not HAS_PLOTLY:
         print("  (plotly not installed — skipping training plot)")
         return
@@ -90,6 +96,10 @@ def generate_training_plot(episodes_csv, plot_path, description="", window=50):
     )
 
     os.makedirs(os.path.dirname(plot_path), exist_ok=True)
+    html = fig.to_html()
+    if auto_refresh:
+        html = html.replace("<head>",
+                            '<head><meta http-equiv="refresh" content="30">', 1)
     with open(plot_path, "w") as f:
-        f.write(fig.to_html())
+        f.write(html)
     print(f"  Training plot saved to {plot_path}")
