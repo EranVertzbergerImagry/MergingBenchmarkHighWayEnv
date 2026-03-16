@@ -110,7 +110,54 @@ In this example, we deploy a model trained in expereiment 7 on multiple agents.
 
 <video src="multi_agent_using_model_trained_on_single_agent_setup.mp4" controls width="600"></video>
 
+### experiment to test the effect of policy frequency 
+I have noticed that 1Hz policy is problematic because not responsive enough. The base model I'm trying to improve is trained in experiment 7  with parameters 1 Hz policy frequency, gamma = 0.95,high_speed_reward = 1. I tested the  model (evaluation_only) 5Hz at the same environment. indeed crashes reduced and overall performance looked better. Now train a new model in 5Hz. I changed
+the parameters to: gamma = 0.99. The gamma was chosen so that the discounted return will propagate the same new_gamma = (0.95 ^ 13) ^ [1/(13*5)] = ~0.99. 
+
+Arrived: 67/100 (67%)  Crashed: 12/100 (12%)  Avg reward: 6.57
+
+  
+  Dest   Episodes  Arrived  Crashed    Stall
+  --------------------------------------
+  o1           41      46%      17%      37%
+  o2           29      62%      14%      24%
+  o3           30      100%       0%       0%
+
 ## experiment 8: multi agent training.
-The model trained in 7 is good. but still there are some crashes caused by the EGO. using the visualization of the attention I can inspect that in some cases
-a close vehicle is not being attended or attended to late. My hypothesis is that interaction with the IDM from the environment is problematic because in some cases, crashes occure because an IDM crashes to the EGO. My initiative is to train using many EGO (controlled) agents. My first attempt (lets call it exp0) was to train experiment 8 with 8 agents. The sult is a stall behavior, EGO stops to avoide collision but never get to the destination. See results in experiments/8_multi_agent/data/runs/2026-03-10_21-28-15_multi_agent_8_controlled_ego_centric. you n see the evaluation and also that reward converges to zero. My next test (now progressing call it exp1) is training with one controlled agent to verify experiment 7 is reproduced and theres no bug (see 
-experiments/8_multi_agent/data/runs/2026-03-11_14-45-38_multi_agent_1_controlled_vehicle). I can already see reward at 3-4. So maybe it was I have some oughts and ideas (assuming there's no bug): maybe the result in exp0 was caused by too much traffic (10 iitial IDMs + 0.6 spawn probability + 8 more controlled). So because in most cases the intersection gets ocked the training collapses to the "stall mode". 1. I'm thinking to train with only controlled (10 initial + 0.6 spawn probability like in experiment 7). 2. start training with an initial model hieved in 7.
+The model trained in 7 is good. but still there are some crashes caused by the EGO. using the visualization of the attention I can inspect that in some cases where a close vehicle is not being attended or attended to late. My hypothesis is that interaction with the IDM from the environment is problematic because in some cases, crashes occure because an IDM crashes to the EGO. 
+My initiative is to train using many EGO (controlled) agents. My first attempt (lets call it exp0) was to train experiment 8 with 8 agents. The result is a stall behavior, EGO stops to avoide collision but never get to the destination. See results in experiments/8_multi_agent/data/runs/2026-03-10_21-28-15_multi_agent_8_controlled_ego_centric. you can see the evaluation and also that reward converges to zero. My next test (call it exp1) is training with one controlled agent to verify experiment 7 is reproduced and theres no bug (see 
+experiments/8_multi_agent/data/runs/2026-03-11_14-45-38_multi_agent_1_controlled_vehicle). I can already see reward at 3-4. I have some thoughts and ideas (assuming there's no bug): maybe the result in exp0 was caused by too much traffic (10 iitial IDMs + 0.6 spawn probability + 8 more controlled). So because in most cases the intersection gets blocked the training collapses to the "stall mode". 
+1. I'm thinking to train with only controlled (10 initial + 0.6 spawn probability like in experiment 7). 
+2. start training with an initial model achieved in 7.
+* train a model with a different exploration profile with tau raised 15K->500K
+  tested on the 4 agent benchmark with a 5 hz policy frequency
+  results:
+  SUMMARY,100 episodes,394 agents spawned,avg_reward=22.76,arrived=78%,crashed=12%,stall=9%
+  increase in crash rate but maybe we need to train longer with the larger tau because maybe it would keep improving. 
+* try to fine tune the model acheived in 7 using multi agent setup meaning initial_temp=final_temp = 0.05 and see if performance    improves. we start with the best model by now: experiments/7_Social_attention_generalization/data/runs/2026-03-10_11-18-09_ego_attention_2h_random_dest_ego_centric_reference/checkpoint-final.tar
+  **I stopped this experiment in the middle as I didnt see improvement and testing in the middle showed model has degraded. 
+* test fine tune with a smaller learning rate lr = 5e-4 -> 5e-5. If this doesnt work I can try to see if I can use an established policy freezed as a replacement to IDM. **didn't work training collapsed** 
+
+**conclusion training multiple agents is unstable**
+## experiment 9: improved enviromental drivers
+basically replace the the IDM with a model achieved in exp7 (Model0). then train a new model using it as the environment drivers (ED). 
+opening point model achieved in exp7 (experiments/7_Social_attention_generalization/data/runs/2026-03-16_06-43-41_M0_VS_IDM_5Hz_gamma_0.99_high_speed_reward_1.0/checkpoint-final.tar) deployed in the ED. same model evaluated against them. 
+* baseline results M0 VS M0:          Arrive 55%             Crashed: 9%,           Avg reward: 29.08
+Arrived: 62/100 (62%)  Crashed: 10/100 (10%)  Avg reward: 6.32
+
+    Dest   Episodes  Arrived  Crashed    Stall
+  --------------------------------------
+  o1           37      35%      16%      49%
+  o2           27      52%      15%      33%
+  o3           36      97%       0%       3%
+
+
+* model trained from scrach M1 on M0 ED: Arrived: 78/100 (78%)  Crashed: 10/100 (10%)  Avg reward: 35.10
+* Fine tune from M0
+ Arrived: 87/100 (87%)  Crashed: 13/100 (13%)  Avg reward: 39.94
+
+  Dest   Episodes  Arrived  Crashed    Stall
+  --------------------------------------
+  o1           35      83%      17%       0%
+  o2           33      88%      12%       0%
+  o3           32      91%       9%       0%
