@@ -1,9 +1,9 @@
 """
-Social Attention DQN — Experiment 9: Frozen Opponents Training
+Social Attention DQN — Experiment 9: Unified Intersection Training
 
-Trains a single ego agent against frozen model-driven traffic (no IDM).
-Frozen opponents use a pre-trained checkpoint (e.g., from experiment 7)
-to select actions, replacing IDM vehicles entirely.
+Supports both IDM and frozen-model traffic, with single or multi-agent control.
+Set "enviromental_driver_model" to "IDM" for IDM traffic or a checkpoint path
+for frozen model traffic. Set "controlled_vehicles" > 1 for multi-agent.
 
 Usage:
     python train.py
@@ -42,6 +42,177 @@ from gymnasium.wrappers import RecordVideo
 
 from src import EgoCentricWrapper, TrainingTracker, generate_training_plot
 import src  # noqa: F401 — triggers gym.register via src/__init__.py
+
+
+# ---------------------------------------------------------------------------
+# Multi-agent record() patch (from experiment 8)
+# ---------------------------------------------------------------------------
+def _patch_record_for_multi_agent(agent):
+    """Monkey-patch agent.record() to use per-agent rewards from info."""
+    original_record = agent.record.__func__
+
+    def patched_record(self, state, action, reward, next_state, done, info):
+        if not self.training:
+            return
+        if isinstance(state, tuple) and isinstance(action, tuple):
+            agent_rewards = info.get("agent_rewards")
+            if agent_rewards is None:
+                agent_rewards = [reward] * len(state)
+            for i, (s, a, ns) in enumerate(
+                zip(state, action, next_state)
+            ):
+                if s.sum() == 0:
+                    continue
+                self.memory.push(s, a, agent_rewards[i], ns, done, info)
+            batch = self.sample_minibatch()
+            if batch:
+                loss, _, _ = self.compute_bellman_residual(batch)
+                self.step_optimizer(loss)
+                self.update_target_network()
+        else:
+            original_record(self, state, action, reward, next_state, done, info)
+
+    import types
+    agent.record = types.MethodType(patched_record, agent)
+
+
+# ---------------------------------------------------------------------------
+# Multi-agent attention display (from experiment 8)
+# ---------------------------------------------------------------------------
+AGENT_COLORS = [
+    (50, 200, 50),    # green  — agent 0
+    (50, 100, 255),   # blue   — agent 1
+    (255, 165, 0),    # orange — agent 2
+    (200, 50, 200),   # purple — agent 3
+]
+
+MIN_ATTENTION = 0.01
+
+
+def _compute_attention_for_state(agent, single_state):
+    import torch
+    state_t = torch.tensor([single_state], dtype=torch.float).to(agent.device)
+    attention = agent.value_net.get_attention_matrix(state_t)
+    attention = attention.squeeze(0).squeeze(1).detach().cpu().numpy()
+    _, _, mask = agent.value_net.split_input(state_t)
+    mask = mask.squeeze()
+    return attention, mask
+
+
+def _match_state_to_vehicles(single_state, mask, obs_type, road_vehicles, ego_vehicle):
+    from rl_agents.utils import remap
+
+    ego_heading = ego_vehicle.heading
+    cos_h = np.cos(ego_heading)
+    sin_h = np.sin(ego_heading)
+    ego_pos = ego_vehicle.position
+
+    x_idx = obs_type.features.index("x")
+    y_idx = obs_type.features.index("y")
+
+    v_map = {}
+    for v_index in range(single_state.shape[0]):
+        if mask[v_index]:
+            continue
+        if v_index == 0:
+            v_map[v_index] = ego_vehicle
+            continue
+
+        ex = remap(single_state[v_index, x_idx], [-1, 1], obs_type.features_range["x"])
+        ey = remap(single_state[v_index, y_idx], [-1, 1], obs_type.features_range["y"])
+
+        wx = cos_h * ex - sin_h * ey
+        wy = sin_h * ex + cos_h * ey
+
+        world_pos = np.array([wx + ego_pos[0], wy + ego_pos[1]])
+        v_map[v_index] = min(road_vehicles, key=lambda v: np.linalg.norm(v.position - world_pos))
+    return v_map
+
+
+def unified_attention_display(agent, agent_surface, sim_surface):
+    """Attention display that delegates to standard rl-agents graphics for single-agent
+    and custom multi-agent overlay for multi-agent."""
+    from rl_agents.agents.common.graphics import AgentGraphics
+
+    state = getattr(agent, '_multi_agent_state', None)
+    if state is None:
+        state = agent.previous_state
+
+    # Single-agent: use standard AgentGraphics which draws Q-value pane + attention
+    if not isinstance(state, tuple):
+        AgentGraphics.display(agent, agent_surface, sim_surface)
+        return
+
+    # Multi-agent: custom overlay
+    _multi_agent_attention_overlay(agent, agent_surface, sim_surface, state)
+
+
+def _multi_agent_attention_overlay(agent, agent_surface, sim_surface, state):
+    import pygame
+    pygame.draw.rect(agent_surface, (0, 0, 0),
+                     (0, 0, agent_surface.get_width(), agent_surface.get_height()), 0)
+    if state is None:
+        return
+
+    env = agent.env.unwrapped
+    obs_type = env.observation_type
+
+    agent_states = state if isinstance(state, tuple) else (state,)
+
+    for agent_idx in range(len(agent_states)):
+        single_state = agent_states[agent_idx]
+
+        if single_state.sum() == 0:
+            continue
+
+        # For multi-agent with staggered spawning
+        if hasattr(env, '_agent_spawned'):
+            if not (agent_idx < len(env._agent_spawned)
+                    and env._agent_spawned[agent_idx]
+                    and env._agent_vehicle_idx[agent_idx] is not None):
+                continue
+            vidx = env._agent_vehicle_idx[agent_idx]
+            ego_vehicle = env.controlled_vehicles[vidx]
+        else:
+            if not env.controlled_vehicles:
+                continue
+            ego_vehicle = env.controlled_vehicles[min(agent_idx, len(env.controlled_vehicles) - 1)]
+
+        try:
+            attention, mask = _compute_attention_for_state(agent, single_state)
+            v_map = _match_state_to_vehicles(
+                single_state, mask, obs_type,
+                env.road.vehicles, ego_vehicle,
+            )
+        except (ValueError, IndexError, RuntimeError):
+            continue
+
+        base_color = AGENT_COLORS[agent_idx % len(AGENT_COLORS)]
+
+        for head in range(attention.shape[0]):
+            attn_surface = pygame.Surface(sim_surface.get_size(), pygame.SRCALPHA)
+            for v_index, vehicle in v_map.items():
+                att_val = attention[head, v_index]
+                if att_val < MIN_ATTENTION:
+                    continue
+                width = att_val * 5
+                alpha = int(min(att_val * 400, 200))
+                color = (*base_color, alpha)
+
+                ego_pix = sim_surface.vec2pix(ego_vehicle.position)
+                if vehicle is ego_vehicle:
+                    pygame.draw.circle(
+                        attn_surface, color, ego_pix,
+                        max(sim_surface.pix(width / 2), 1),
+                    )
+                else:
+                    pygame.draw.line(
+                        attn_surface, color, ego_pix,
+                        sim_surface.vec2pix(vehicle.position),
+                        max(sim_surface.pix(width), 1),
+                    )
+            sim_surface.blit(attn_surface, (0, 0))
+
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -132,6 +303,11 @@ def make_run_dir(config):
 # ---------------------------------------------------------------------------
 # Train
 # ---------------------------------------------------------------------------
+def is_multi_agent(env_config):
+    """Check if the env config is for a multi-agent environment."""
+    return env_config.get("controlled_vehicles", 1) > 1
+
+
 def train(config, run_dir, initial_model=None, visualize=False):
     env_config = config["env"]
     agent_config = config["agent"]
@@ -140,11 +316,18 @@ def train(config, run_dir, initial_model=None, visualize=False):
     episodes_csv = os.path.join(run_dir, "episodes.csv")
     plot_path = os.path.join(run_dir, "training_progress.html")
 
-    print("=== Training with Frozen Opponents ===")
+    n_agents = env_config.get("controlled_vehicles", 1)
+    traffic_model = config.get("enviromental_driver_model", "IDM")
+    traffic_label = "IDM" if traffic_model == "IDM" else "Frozen model"
+
+    print("=== Training ===")
     print(f"Env id:          {env_config['id']}")
+    print(f"Traffic model:   {traffic_label}")
+    print(f"Agents:          {n_agents}")
     print(f"Episodes:        {train_episodes}")
     print(f"Run dir:         {run_dir}")
-    print(f"Frozen model:    {env_config.get('enviromental_driver_model_path', 'N/A')}")
+    if traffic_model != "IDM":
+        print(f"Frozen model:    {env_config.get('enviromental_driver_model_path', 'N/A')}")
     print(f"Obs features:    {env_config['observation']['features']}")
     if initial_model:
         print(f"Warm-start from: {initial_model}")
@@ -156,6 +339,9 @@ def train(config, run_dir, initial_model=None, visualize=False):
     if initial_model:
         print(f"Loading initial model from {initial_model}")
         agent.load(initial_model)
+
+    if is_multi_agent(env_config):
+        _patch_record_for_multi_agent(agent)
 
     tracker = TrainingTracker(
         episodes_csv,
@@ -196,18 +382,15 @@ def train(config, run_dir, initial_model=None, visualize=False):
 # ---------------------------------------------------------------------------
 def run_episodes(agent, env, num_episodes):
     """Run episodes with agent in eval mode and return per-episode results."""
+    multi = isinstance(env.unwrapped.observation_space, gym.spaces.Tuple)
     results = []
+
     for ep in range(num_episodes):
         obs, info = env.reset()
-        try:
-            vehicle = env.unwrapped.vehicle
-            route = vehicle.route
-            destination = route[-1][1] if route else "?"
-        except (AttributeError, IndexError):
-            destination = "?"
 
         done = False
         total_reward = 0.0
+        agent_reward_sums = None
         steps = 0
 
         while not done:
@@ -215,28 +398,69 @@ def run_episodes(agent, env, num_episodes):
             obs, reward, terminated, truncated, info = env.step(action)
             done = terminated or truncated
             total_reward += reward
+            per_agent = info.get("agent_rewards")
+            if per_agent is not None:
+                if agent_reward_sums is None:
+                    agent_reward_sums = [0.0] * len(per_agent)
+                for i, r in enumerate(per_agent):
+                    agent_reward_sums[i] += r
             steps += 1
 
-        crashed = info.get("crashed", False)
-        arrived = info.get("rewards", {}).get("arrived_reward", 0) > 0
-        if not arrived:
-            arrived = info.get("is_success", False)
-        results.append({
-            "episode": ep + 1,
-            "steps": steps,
-            "reward": total_reward,
-            "crashed": crashed,
-            "arrived": arrived,
-            "destination": destination,
-        })
-        status = "ARRIVED" if arrived else ("CRASHED" if crashed else "TIMEOUT")
-        print(f"  Episode {ep + 1}: {status} | dest={destination} | Steps: {steps} | Reward: {total_reward:.2f}")
+        if multi:
+            agents_info = info.get("agents", [])
+            for ai in agents_info:
+                i = ai["agent_id"]
+                r = agent_reward_sums[i] if agent_reward_sums else total_reward
+                results.append({
+                    "episode": ep + 1,
+                    "agent_id": i,
+                    "steps": steps,
+                    "reward": r,
+                    "crashed": ai.get("crashed", False),
+                    "arrived": ai.get("arrived", False),
+                    "destination": ai.get("destination", "?"),
+                    "entry": ai.get("entry", "?"),
+                    "spawned": ai.get("spawned", False),
+                })
+            n_arrived = sum(1 for a in agents_info if a.get("arrived"))
+            n_crashed = sum(1 for a in agents_info if a.get("crashed"))
+            n_spawned = sum(1 for a in agents_info if a.get("spawned"))
+            print(
+                f"  Episode {ep + 1}: "
+                f"arrived={n_arrived}/{n_spawned} crashed={n_crashed}/{n_spawned} "
+                f"| Steps: {steps} | Avg Reward: {total_reward:.2f}"
+            )
+        else:
+            try:
+                vehicle = env.unwrapped.vehicle
+                route = vehicle.route
+                destination = route[-1][1] if route else "?"
+            except (AttributeError, IndexError):
+                destination = "?"
+
+            crashed = info.get("crashed", False)
+            arrived = info.get("rewards", {}).get("arrived_reward", 0) > 0
+            if not arrived:
+                arrived = info.get("is_success", False)
+            results.append({
+                "episode": ep + 1,
+                "agent_id": 0,
+                "steps": steps,
+                "reward": total_reward,
+                "crashed": crashed,
+                "arrived": arrived,
+                "destination": destination,
+                "entry": "?",
+                "spawned": True,
+            })
+            status = "ARRIVED" if arrived else ("CRASHED" if crashed else "TIMEOUT")
+            print(f"  Episode {ep + 1}: {status} | dest={destination} | Steps: {steps} | Reward: {total_reward:.2f}")
 
     return results
 
 
 def evaluate_agent(agent, env_config, run_dir, num_episodes, eval_csv=None):
-    """Post-training evaluation writing evaluation.csv with per-destination breakdown."""
+    """Post-training evaluation with per-agent and per-destination breakdown."""
     if eval_csv is None:
         eval_csv = os.path.join(run_dir, "evaluation.csv")
 
@@ -249,20 +473,28 @@ def evaluate_agent(agent, env_config, run_dir, num_episodes, eval_csv=None):
     results = run_episodes(agent, env, num_episodes)
     env.close()
 
+    fieldnames = ["episode", "agent_id", "steps", "reward", "crashed", "arrived",
+                  "destination", "entry", "spawned"]
     with open(eval_csv, "w", newline="") as f:
-        writer = csv.DictWriter(
-            f, fieldnames=["episode", "steps", "reward", "crashed", "arrived", "destination"]
-        )
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(results)
 
-    n_crashed = sum(r["crashed"] for r in results)
-    n_arrived = sum(r["arrived"] for r in results)
-    avg_reward = np.mean([r["reward"] for r in results])
+    # Compute stats (only for spawned agents)
+    spawned_results = [r for r in results if r.get("spawned", True)]
+    n_total = len(spawned_results)
+    n_crashed = sum(r["crashed"] for r in spawned_results)
+    n_arrived = sum(r["arrived"] for r in spawned_results)
+    n_stall = n_total - n_crashed - n_arrived
+
+    ep_rewards = defaultdict(list)
+    for r in spawned_results:
+        ep_rewards[r["episode"]].append(r["reward"])
+    avg_reward = np.mean([np.mean(v) for v in ep_rewards.values()]) if ep_rewards else 0.0
 
     # Per-destination breakdown
     dest_stats = defaultdict(lambda: {"total": 0, "arrived": 0, "crashed": 0, "stall": 0})
-    for r in results:
+    for r in spawned_results:
         d = r["destination"]
         dest_stats[d]["total"] += 1
         if r["arrived"]:
@@ -272,16 +504,31 @@ def evaluate_agent(agent, env_config, run_dir, num_episodes, eval_csv=None):
         else:
             dest_stats[d]["stall"] += 1
 
+    # Per-entry breakdown
+    entry_stats = defaultdict(lambda: {"total": 0, "arrived": 0, "crashed": 0, "stall": 0})
+    for r in spawned_results:
+        e = r["entry"]
+        entry_stats[e]["total"] += 1
+        if r["arrived"]:
+            entry_stats[e]["arrived"] += 1
+        elif r["crashed"]:
+            entry_stats[e]["crashed"] += 1
+        else:
+            entry_stats[e]["stall"] += 1
+
     with open(eval_csv, "a", newline="") as f:
         writer = csv.writer(f)
         writer.writerow([])
         writer.writerow([
-            "SUMMARY", num_episodes, f"{avg_reward:.2f}",
-            f"{100 * n_crashed / num_episodes:.0f}%",
-            f"{100 * n_arrived / num_episodes:.0f}%",
+            "SUMMARY", f"{num_episodes} episodes",
+            f"{n_total} agents spawned",
+            f"avg_reward={avg_reward:.2f}",
+            f"arrived={100 * n_arrived / max(n_total, 1):.0f}%",
+            f"crashed={100 * n_crashed / max(n_total, 1):.0f}%",
+            f"stall={100 * n_stall / max(n_total, 1):.0f}%",
         ])
         writer.writerow([])
-        writer.writerow(["destination", "episodes", "arrived%", "crashed%", "stall%"])
+        writer.writerow(["destination", "agents", "arrived%", "crashed%", "stall%"])
         for dest in sorted(dest_stats.keys()):
             s = dest_stats[dest]
             n = s["total"]
@@ -291,22 +538,44 @@ def evaluate_agent(agent, env_config, run_dir, num_episodes, eval_csv=None):
                 f"{100 * s['crashed'] / n:.0f}%",
                 f"{100 * s['stall'] / n:.0f}%",
             ])
+        writer.writerow([])
+        writer.writerow(["entry", "agents", "arrived%", "crashed%", "stall%"])
+        for entry in sorted(entry_stats.keys()):
+            s = entry_stats[entry]
+            n = s["total"]
+            writer.writerow([
+                entry, n,
+                f"{100 * s['arrived'] / n:.0f}%",
+                f"{100 * s['crashed'] / n:.0f}%",
+                f"{100 * s['stall'] / n:.0f}%",
+            ])
 
     print()
     print(
-        f"  Arrived: {n_arrived}/{num_episodes} "
-        f"({100 * n_arrived / num_episodes:.0f}%)  "
-        f"Crashed: {n_crashed}/{num_episodes} "
-        f"({100 * n_crashed / num_episodes:.0f}%)  "
+        f"  Agents spawned: {n_total} across {num_episodes} episodes\n"
+        f"  Arrived: {n_arrived}/{n_total} "
+        f"({100 * n_arrived / max(n_total, 1):.0f}%)  "
+        f"Crashed: {n_crashed}/{n_total} "
+        f"({100 * n_crashed / max(n_total, 1):.0f}%)  "
+        f"Stall: {n_stall}/{n_total} "
+        f"({100 * n_stall / max(n_total, 1):.0f}%)  "
         f"Avg reward: {avg_reward:.2f}"
     )
     print()
-    print(f"  {'Dest':<6} {'Episodes':>8} {'Arrived':>8} {'Crashed':>8} {'Stall':>8}")
-    print(f"  {'-'*38}")
+    print(f"  {'Dest':<8} {'Agents':>7} {'Arrived':>8} {'Crashed':>8} {'Stall':>8}")
+    print(f"  {'-'*41}")
     for dest in sorted(dest_stats.keys()):
         s = dest_stats[dest]
         n = s["total"]
-        print(f"  {dest:<6} {n:>8} {100*s['arrived']/n:>7.0f}% {100*s['crashed']/n:>7.0f}% {100*s['stall']/n:>7.0f}%")
+        print(f"  {dest:<8} {n:>7} {100*s['arrived']/n:>7.0f}% {100*s['crashed']/n:>7.0f}% {100*s['stall']/n:>7.0f}%")
+    if len(entry_stats) > 1:
+        print()
+        print(f"  {'Entry':<8} {'Agents':>7} {'Arrived':>8} {'Crashed':>8} {'Stall':>8}")
+        print(f"  {'-'*41}")
+        for entry in sorted(entry_stats.keys()):
+            s = entry_stats[entry]
+            n = s["total"]
+            print(f"  {entry:<8} {n:>7} {100*s['arrived']/n:>7.0f}% {100*s['crashed']/n:>7.0f}% {100*s['stall']/n:>7.0f}%")
     print()
     print(f"  Saved to {eval_csv}")
 
@@ -316,9 +585,8 @@ def evaluate_agent(agent, env_config, run_dir, num_episodes, eval_csv=None):
 # ---------------------------------------------------------------------------
 def demo(agent, env_config, num_episodes):
     """Record demo videos with attention overlay using RecordVideo wrapper."""
-    from rl_agents.agents.common.graphics import AgentGraphics
-
     video_folder = os.path.join(SCRIPT_DIR, "data", "videos")
+    multi = is_multi_agent(env_config)
 
     print()
     print(f"=== Recording Demo Videos ({num_episodes} episodes) ===")
@@ -334,7 +602,7 @@ def demo(agent, env_config, num_episodes):
         env,
         video_folder=video_folder,
         episode_trigger=lambda e: True,
-        name_prefix="frozen_opponents",
+        name_prefix="unified",
     )
     try:
         env.unwrapped.set_record_video_wrapper(env)
@@ -345,30 +613,46 @@ def demo(agent, env_config, num_episodes):
     agent.eval()
 
     from highway_env.envs.common.graphics import EnvViewer
-    EnvViewer.agent_display = (
-        lambda agent_surface, sim_surface:
-            AgentGraphics.display(agent, agent_surface, sim_surface)
-    )
+    EnvViewer.agent_display = lambda a_surf, s_surf: unified_attention_display(agent, a_surf, s_surf)
+
+    # Fixed camera for multi-agent
+    class _FixedObserver:
+        position = np.array([0, 0])
 
     for ep in range(num_episodes):
         obs, info = env.reset()
+
+        if multi:
+            try:
+                env.unwrapped.viewer.observer_vehicle = _FixedObserver()
+            except AttributeError:
+                pass
 
         done = False
         total_reward = 0.0
         steps = 0
         while not done:
+            agent._multi_agent_state = obs
             action = agent.act(obs)
             obs, reward, terminated, truncated, info = env.step(action)
             done = terminated or truncated
             total_reward += reward
             steps += 1
 
-        crashed = info.get("crashed", False)
-        arrived = info.get("rewards", {}).get("arrived_reward", 0) > 0
-        if not arrived:
+        agents_info = info.get("agents", [])
+        if agents_info:
+            n_arrived = sum(1 for a in agents_info if a.get("arrived"))
+            n_crashed = sum(1 for a in agents_info if a.get("crashed"))
+            n_spawned = sum(1 for a in agents_info if a.get("spawned"))
+            print(
+                f"  Episode {ep + 1}: arrived={n_arrived}/{n_spawned} "
+                f"crashed={n_crashed}/{n_spawned} | Steps: {steps} | Avg Reward: {total_reward:.2f}"
+            )
+        else:
+            crashed = info.get("crashed", False)
             arrived = info.get("is_success", False)
-        status = "ARRIVED" if arrived else ("CRASHED" if crashed else "TIMEOUT")
-        print(f"  Episode {ep + 1}: {status} | Steps: {steps} | Reward: {total_reward:.2f}")
+            status = "ARRIVED" if arrived else ("CRASHED" if crashed else "TIMEOUT")
+            print(f"  Episode {ep + 1}: {status} | Steps: {steps} | Reward: {total_reward:.2f}")
 
     env.close()
     EnvViewer.agent_display = None
@@ -387,7 +671,7 @@ def demo(agent, env_config, num_episodes):
 # ---------------------------------------------------------------------------
 def visualize_agent(agent, env_config, num_episodes):
     """Run episodes with render_mode='human' and attention overlay."""
-    from rl_agents.agents.common.graphics import AgentGraphics
+    multi = is_multi_agent(env_config)
 
     print()
     print(f"=== Visualizing Agent ({num_episodes} episodes) ===")
@@ -399,29 +683,45 @@ def visualize_agent(agent, env_config, num_episodes):
     agent.env = env
     agent.eval()
 
+    class _FixedObserver:
+        position = np.array([0, 0])
+
     for ep in range(num_episodes):
         obs, info = env.reset()
         if ep == 0:
             try:
                 env.unwrapped.viewer.set_agent_display(
-                    lambda agent_surface, sim_surface:
-                        AgentGraphics.display(agent, agent_surface, sim_surface)
+                    lambda a_surf, s_surf: unified_attention_display(agent, a_surf, s_surf)
                 )
             except AttributeError:
                 print("  Warning: viewer does not support agent display overlay")
+        if multi:
+            try:
+                env.unwrapped.viewer.observer_vehicle = _FixedObserver()
+            except AttributeError:
+                pass
+
         done = False
         total_reward = 0.0
         steps = 0
         while not done:
+            agent._multi_agent_state = obs
             action = agent.act(obs)
             obs, reward, terminated, truncated, info = env.step(action)
             done = terminated or truncated
             total_reward += reward
             steps += 1
-        crashed = info.get("crashed", False)
-        arrived = info.get("rewards", {}).get("arrived_reward", 0) > 0
-        status = "ARRIVED" if arrived else ("CRASHED" if crashed else "TIMEOUT")
-        print(f"  Episode {ep + 1}: {status} | Steps: {steps} | Reward: {total_reward:.2f}")
+
+        agents_info = info.get("agents", [])
+        if agents_info:
+            n_arrived = sum(1 for a in agents_info if a.get("arrived"))
+            n_crashed = sum(1 for a in agents_info if a.get("crashed"))
+            print(f"  Episode {ep + 1}: arrived={n_arrived} crashed={n_crashed} | Steps: {steps} | Avg Reward: {total_reward:.2f}")
+        else:
+            crashed = info.get("crashed", False)
+            arrived = info.get("is_success", False)
+            status = "ARRIVED" if arrived else ("CRASHED" if crashed else "TIMEOUT")
+            print(f"  Episode {ep + 1}: {status} | Steps: {steps} | Reward: {total_reward:.2f}")
 
     env.close()
     print()
@@ -433,7 +733,7 @@ def visualize_agent(agent, env_config, num_episodes):
 # ---------------------------------------------------------------------------
 def main():
     parser = argparse.ArgumentParser(
-        description="Social Attention DQN — Experiment 9: Frozen Opponents"
+        description="Social Attention DQN — Experiment 9: Unified Intersection"
     )
     parser.add_argument(
         "--initial-model", type=str, default=None,
@@ -481,23 +781,21 @@ def main():
     if args.random_spawn:
         config["env"]["spawn_entry"] = None
 
-    # Resolve frozen model path from config and inject into env config
-    frozen_model_rel = config.get("enviromental_driver_model")
-    if not frozen_model_rel:
-        print("Error: 'enviromental_driver_model' not set in config")
-        return
-    # Resolve relative to repo root (two levels up from script dir)
-    repo_root = os.path.dirname(os.path.dirname(SCRIPT_DIR))
-    frozen_model_path = os.path.join(repo_root, frozen_model_rel)
-    if not os.path.exists(frozen_model_path):
-        # Try as absolute path
-        frozen_model_path = frozen_model_rel
-    if not os.path.exists(frozen_model_path):
-        print(f"Error: Frozen model checkpoint not found: {frozen_model_path}")
-        return
-    frozen_model_path = os.path.abspath(frozen_model_path)
-    config["env"]["enviromental_driver_model_path"] = frozen_model_path
-    config["env"]["frozen_agent_config"] = config["agent"]
+    # Resolve traffic model: "IDM" means standard IDM, otherwise it's a frozen model path
+    driver_model = config.get("enviromental_driver_model", "IDM")
+    if driver_model and driver_model != "IDM":
+        # Resolve frozen model path
+        repo_root = os.path.dirname(os.path.dirname(SCRIPT_DIR))
+        frozen_model_path = os.path.join(repo_root, driver_model)
+        if not os.path.exists(frozen_model_path):
+            frozen_model_path = driver_model
+        if not os.path.exists(frozen_model_path):
+            print(f"Error: Frozen model checkpoint not found: {frozen_model_path}")
+            return
+        frozen_model_path = os.path.abspath(frozen_model_path)
+        config["env"]["enviromental_driver_model_path"] = frozen_model_path
+        config["env"]["frozen_agent_config"] = config["agent"]
+    # else: IDM mode — no frozen model path needed, env uses parent IDM behavior
 
     env_config = config["env"]
     agent_config = config["agent"]
